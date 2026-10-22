@@ -220,7 +220,7 @@ def test_the_collision_check_refuses_a_gripper_over_a_wall():
 def test_a_cube_against_the_bin_wall_is_handed_to_the_person(tmp_path, monkeypatch):
     """A cube the gripper cannot reach without touching a wall is not grasped: the
     person is asked to nudge it, and the pick goes on once it has moved."""
-    cube = [BIN[0] + 0.10, BIN[1], 0.025]  # 4 cm from the inner wall
+    cube = [BIN[0] + 0.12, BIN[1], 0.025]  # 2 cm from the inner wall
 
     monkeypatch.setattr(ConstantTargetSource, "get_target", lambda self: tuple(cube))
 
@@ -304,7 +304,11 @@ def test_the_grasp_on_the_other_faces_is_used_when_only_it_clears():
     """With a gripper wide enough that its finger direction decides, a cube near a
     wall gets the grasp turned a quarter (fingers along the wall)."""
     cfg = _compose(
-        **{"pick.top_down.in_bin.finger_half_span": 0.10, "env.cube_pose": IN_BIN}
+        **{
+            "pick.top_down.in_bin.finger_half_span": 0.10,
+            "pick.top_down.in_bin.gripper_model": "box",
+            "env.cube_pose": IN_BIN,
+        }
     )
     geom = geometry_from_config(cfg.pick.top_down)
     fit = _bin_fit()
@@ -409,8 +413,9 @@ def test_a_floor_cube_30_cm_from_the_bin_is_still_pickable():
 
 
 def test_the_floor_pick_uses_the_other_faces_when_only_they_clear():
-    """With a gripper wide enough that its finger direction decides, a floor cube
-    beside the wall gets the grasp turned a quarter (fingers along the wall)."""
+    """A floor cube close beside the wall gets the grasp turned a quarter (fingers
+    along the wall): with the real 2F-85 links, 5-8 cm from the wall only the turned
+    grasp clears it (at 9 cm both do)."""
     from prpl_tidybot.robot_skills import (  # pylint: disable=import-outside-toplevel
         _floor_grasp_geometry,
     )
@@ -418,13 +423,13 @@ def test_the_floor_pick_uses_the_other_faces_when_only_they_clear():
         RETRACT_ARM_CONF,
     )
 
-    cfg = _compose(**{"pick.top_down.in_bin.finger_half_span": 0.10})
+    cfg = _compose()
     geom = geometry_from_config(cfg.pick.top_down)
     in_bin = cfg.pick.top_down.in_bin
     fit = _bin_fit()
     base = (fit.x + 0.67, fit.y, math.pi)
     # Beside the +y end wall (the bin's length is along y), outside it.
-    cube = {"x": fit.x, "y": fit.y + fit.length / 2 + 0.09, "yaw_deg": 0.0}
+    cube = {"x": fit.x, "y": fit.y + fit.length / 2 + 0.07, "yaw_deg": 0.0}
     results = {}
     for turn in (0.0, math.pi / 2):
         g = dataclasses.replace(geom, closing_turn=turn)
