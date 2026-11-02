@@ -30,6 +30,21 @@ pick:
     # the red bottle, and it does see the blue bin (hue ~127).
     lateral_servo:
       enabled: false
+    # No pick out of the bin: it plans for the 5 cm cube (in_bin.cube_width, a 70 mm
+    # opening against the 66 mm bottle) and has never run on the bottle, and in the
+    # barrier layout the floor and in-bin picks are one skill, so in-bin misses would
+    # pull down the floor pick's competence. A bottle in the bin is refused and the bin
+    # dump (dump_bin) empties it instead (Josh, 2026-11-02: "dump every time"). The
+    # floor pick's wall check keeps the same margins (robot_skills.bin_margins).
+    in_bin:
+      enabled: false
+
+# observe()["cube_upright"] is the cube's flat-on-a-face check, its silhouette fit's
+# IoU against skill_server.upright_min_iou (0.75). A lying bottle has no other rest
+# the pick sees (a standing one is not found at all) and fits at ~0.75 on a good
+# frame, so every bottle found on the floor is resting.
+skill_server:
+  upright_min_iou: 0.0
 
 # mode=sim draws and rests the bottle lying (its radius off the floor).
 sim:
