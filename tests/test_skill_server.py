@@ -845,3 +845,16 @@ def test_the_fake_arm_refuses_a_streamed_command_while_released():
     arm.release()
     with pytest.raises(RuntimeError, match="released"):
         arm.execute_action([0.0] * 7, 0.0)
+
+
+def test_an_angular_dump_sends_each_multi_waypoint_stage_as_one_trajectory():
+    """Under the onboard controller every waypoint used to be its own stop-and-go
+    move (16 in the roll, 2026-11-02 run 54). Each stage with several waypoints is
+    now one continuous trajectory through them."""
+    skills = build_skills(_cfg(**{"pick.top_down.arm_controller": "angular"}))
+    _bin_near(skills)
+    reply = skills.dump_bin()
+    assert reply["dumped"], reply
+    paths = [p for p in skills.arm.trajectories if len(p) > 1]
+    assert len(paths) >= 4  # lift, roll, unroll, lower
+    assert max(len(p) for p in paths) >= 12  # the 160-degree roll
