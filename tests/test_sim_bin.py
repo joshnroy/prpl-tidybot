@@ -137,3 +137,53 @@ def test_the_sim_bin_source_reports_the_live_bin(plan):
     fit = source.localize()
     assert (fit.x, fit.y) == pytest.approx((-0.5, -0.8))
     assert abs(math.sin(fit.yaw - math.pi / 2)) < 1e-9
+
+
+def test_a_rim_grasp_with_the_pads_along_the_wall_does_not_hold(plan):
+    """The pads must straddle the wall: turned a quarter turn about the tool (pads
+    along the wall), closing at the same point grasps nothing."""
+    world = _world(plan)
+    _go(world, plan, "rim")
+    world.q[6] += math.pi / 2  # the wrist turns the pads about the tool axis
+    world.advance(0.02)
+    _close(world)
+    assert not world.bin_held
+
+
+def test_a_bottle_grasp_needs_the_pads_across_its_axis():
+    """A lying bottle is held only when the pads close across its axis: along it,
+    a finger lands on the bottle (2026-11-02, the first real bottle pick)."""
+    from prpl_tidybot.bin_pour import (  # pylint: disable=import-outside-toplevel
+        _down_quat,
+        tool_joints,
+    )
+    from prpl_tidybot.third_party.constants import (  # pylint: disable=import-outside-toplevel
+        RETRACT_ARM_CONF,
+    )
+
+    for pads_yaw, held in ((math.pi / 2, True), (0.0, False)):
+        world = SimWorld(
+            base_pose=(0.0, 0.0, 0.0),
+            cube=(0.67, 0.0, 0.0),  # lying along the map's x
+            object_half=BOTTLE_HALF,
+            object_kind="bottle",
+        )
+        # _down_quat(c) lays the pinch frame's y along c and so its x, the pads,
+        # along c + 90 degrees.
+        quat = _down_quat(pads_yaw - math.pi / 2)
+        rot = np.empty(9)
+        import mujoco  # pylint: disable=import-outside-toplevel
+
+        mujoco.mju_quat2Mat(  # pylint: disable=no-member
+            rot, np.array([quat[3], quat[0], quat[1], quat[2]])
+        )
+        q = tool_joints(
+            (0.55, 0.0, GEOM.floor_z + GEOM.grasp_height),
+            rot.reshape(3, 3),
+            GEOM,
+            list(RETRACT_ARM_CONF),
+        )
+        world.q = np.array(q, float)
+        world.advance(0.02)
+        _close(world)
+        assert world.held == held, pads_yaw

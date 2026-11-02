@@ -82,6 +82,7 @@ class TossSim:
             cube=(cube[0], cube[1], math.radians(cube[2])),
             landing_offset=[float(v) for v in sim.landing_offset],
             object_half=float(sim.get("object_half", 0.025)),
+            object_kind=str(sim.get("object", "cube")),
             bin_pose=(
                 None
                 if sim_bin is None

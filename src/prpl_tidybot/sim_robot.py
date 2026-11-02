@@ -106,6 +106,7 @@ class SimWorld:
         landing_offset: Sequence[float] = (1.2, 0.0),
         record_period: float = 0.005,
         object_half: float = _CUBE_HALF,
+        object_kind: str = "cube",
         bin_pose: Sequence[float] | None = None,
         bin_model: Sequence[float] | None = None,
     ) -> None:
@@ -133,6 +134,9 @@ class SimWorld:
         # The object's half height resting on the floor (the cube's half side, the
         # lying bottle's radius).
         self._half = float(object_half)
+        # "bottle": held only when the pads close across its axis (the cube, the same
+        # every 90 degrees, by its position alone).
+        self.object_kind = object_kind
         self._cube = np.array([cube[0], cube[1], self._half, cube[2]], dtype=float)
         # The bin: (rim length, rim width, height, base length, base width, wall), its
         # map transform (4x4; z = 0 at its base) and, while held, its transform in the
@@ -231,10 +235,12 @@ class SimWorld:
         return self._bin.copy()
 
     def pinch_frame(self) -> NDArray[np.float64]:
-        """The gripper's pinch frame in the map frame (columns: x, closing, approach)."""
+        """The gripper's pinch frame in the map frame (columns: x, the pads' direction;
+        y, ``forward_kinematics``' "closing"; z, the approach)."""
         _, approach, closing = forward_kinematics(list(self.q), self._geom)
         arm = np.column_stack([np.cross(closing, approach), closing, approach])
-        return _transform(*self.pinch_world(), _rot_z(float(self.base[2])) @ arm)
+        x, y, z = (float(v) for v in self.pinch_world())
+        return _transform(x, y, z, _rot_z(float(self.base[2])) @ arm)
 
     def throw_cube(self) -> None:
         """The gripper opened mid-swing: the cube leaves the pinch point and lands
@@ -367,8 +373,12 @@ class SimWorld:
         lx, ly, lz = local[:3]
         if not height - self._geom.pad_drop - 0.03 <= lz <= height + 0.01:
             return False
+        pads = np.linalg.inv(self._bin)[:3, :3] @ self.pads_world()
+        # The pads must straddle the wall: move across it, not along it.
         on_side = abs(abs(ly) - width / 2) < 0.025 and abs(lx) < length / 2
+        on_side = on_side and abs(pads[1]) > 0.87
         on_end = abs(abs(lx) - length / 2) < 0.025 and abs(ly) < width / 2
+        on_end = on_end and abs(pads[0]) > 0.87
         return bool(on_side or on_end)
 
     def _record(self, force: bool = False) -> None:
@@ -436,10 +446,19 @@ class SimWorld:
         overlap = min(pinch[2], cube[2] + self._half) - max(
             pinch[2] - self._geom.pad_drop, cube[2] - self._half
         )
-        return bool(
+        if not (
             math.hypot(pinch[0] - cube[0], pinch[1] - cube[1]) < 0.02
             and overlap >= _MIN_PAD_OVERLAP
-        )
+        ):
+            return False
+        if self.object_kind == "bottle":
+            axis = np.array([math.cos(cube[3]), math.sin(cube[3]), 0.0])
+            return bool(abs(float(self.pads_world() @ axis)) < 0.5)
+        return True
+
+    def pads_world(self) -> NDArray[np.float64]:
+        """The direction the pads move along, map frame: the pinch frame's x."""
+        return self.pinch_frame()[:3, 0]
 
 
 def _rot_z(yaw: float) -> NDArray[np.float64]:
