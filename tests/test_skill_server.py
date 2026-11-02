@@ -234,6 +234,35 @@ def test_a_lying_bottle_is_resting_whatever_its_cube_fit(monkeypatch, bottle, up
     skills.close()
 
 
+def test_a_bottle_in_the_bin_is_never_picked_out_of_it(monkeypatch):
+    """With +object=bottle the pick out of the bin is off: the in-bin pick plans for the
+    5 cm cube and has never run on the bottle, and in the barrier layout the floor and
+    the in-bin picks are one skill with one competence belief. A bottle in the bin is
+    refused before anything moves (the bin dump gets it out); one on the floor is not
+    (Josh, 2026-11-02: dump every time)."""
+    extra = {"+object": "bottle", "pick.top_down.lateral_servo.enabled": "false"}
+    skills = build_skills(_cfg(**extra, **{"env.cube_pose": IN_BIN}))
+    commands = []
+    monkeypatch.setattr(
+        FakeArmInterface,
+        "execute_action",
+        lambda _self, arm, gripper: commands.append((arm, gripper)),
+    )
+    assert skills.observe()["cube_inside_bin"] is True
+    before = _still(skills)
+    check = skills.can_pick()
+    assert check["feasible"] is False and check["refused"] is True
+    assert "pick out of the bin is off" in check["reason"]
+    reply = skills.pick()
+    assert reply["refused"] is True and reply["held"] is False
+    assert not commands
+    assert _still(skills) == before
+    skills.close()
+    on_floor = build_skills(_cfg(**extra))
+    assert on_floor.can_pick()["feasible"] is True
+    on_floor.close()
+
+
 def test_observe_looks_for_the_cube_inside_the_bin_first(skills, monkeypatch):
     """Inside the bin the cube is dim and beyond the floor search (run 31): the bin's
     box is searched first; the cube found there is inside the bin and, 2 cm from its
