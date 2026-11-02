@@ -61,6 +61,15 @@ class ArmInterface(abc.ABC):
         return the measured joints. Only between ``release`` and ``resume``."""
         raise NotImplementedError(f"{type(self).__name__} has no onboard controller.")
 
+    def move_trajectory(self, path: list[list[float]]) -> list[float]:
+        """One continuous move through the waypoints (radians) under the onboard
+        controller, returning the measured joints; by default one ``move_angular``
+        per waypoint. Only between ``release`` and ``resume``."""
+        measured: list[float] = []
+        for goal in path:
+            measured = self.move_angular(goal)
+        return measured
+
     def set_gripper_angular(self, position: float, timeout: float = 4.0) -> float:
         """Move the gripper under the onboard controller; returns where it stopped.
         Only between ``release`` and ``resume``."""
@@ -94,6 +103,8 @@ class FakeArmInterface(ArmInterface):
         self.gripper_state: float = 0.0
         self.toss_calls: list[dict[str, Any]] = []
         self.released = False
+        # Every move_trajectory's waypoints, for tests.
+        self.trajectories: list[list[list[float]]] = []
         # Added to every joint by move_angular, to model an arm that stops short.
         self.angular_offset = 0.0
 
@@ -109,6 +120,12 @@ class FakeArmInterface(ArmInterface):
         self.arm_state = [float(q) + self.angular_offset for q in goal]
         return list(self.arm_state)
 
+    def move_trajectory(self, path: list[list[float]]) -> list[float]:
+        if not self.released:
+            raise RuntimeError("release() the torque loop before an angular move")
+        self.trajectories.append([list(q) for q in path])
+        return self.move_angular(path[-1])
+
     def set_gripper_angular(self, position: float, timeout: float = 4.0) -> float:
         if not self.released:
             raise RuntimeError("release() the torque loop before an angular move")
@@ -122,6 +139,11 @@ class FakeArmInterface(ArmInterface):
         return self.gripper_state
 
     def execute_action(self, arm_goal: list[float], gripper_goal: float) -> None:
+        if self.released:
+            # The real arm server queues a streamed command for the torque loop in a
+            # one-slot queue, which nothing reads while the loop is released: the
+            # second put() blocks forever.
+            raise RuntimeError("execute_action while released: the arm server hangs")
         self.arm_state = list(arm_goal)
         self.gripper_state = gripper_goal
 

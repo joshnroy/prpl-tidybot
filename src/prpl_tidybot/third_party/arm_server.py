@@ -20,7 +20,11 @@ import numpy as np
 from prpl_tidybot.third_party.arm_controller import JointCompliantController
 from prpl_tidybot.third_party.constants import ARM_RPC_HOST, ARM_RPC_PORT, RPC_AUTHKEY
 from prpl_tidybot.third_party.ik_solver import IKSolver
-from prpl_tidybot.third_party.kinova import TorqueControlledArm
+from prpl_tidybot.third_party.kinova import (
+    TorqueControlledArm,
+    angular_waypoint_durations,
+    crosses_wrap,
+)
 from prpl_tidybot.toss import (
     TOSS_GRIPPER_RELEASE_MS,
     TOSS_MAX_VEL,
@@ -141,6 +145,24 @@ class Arm:
         if self.arm.cyclic_running:
             raise RuntimeError("release() the torque loop before an angular move")
         self.arm.move_angular([float(v) for v in np.degrees(qpos) % 360.0])
+        measured = np.radians(self.arm.get_measured_joint_angles())
+        return [float(v) for v in self.radians_clip(measured)]
+
+    def move_joints_trajectory(self, path, speed_deg_s=20.0):
+        # One continuous onboard trajectory through the waypoints (radians), for
+        # multi-waypoint moves that would otherwise stop at each point; falls back to
+        # one move per waypoint when a joint would pass 0/360 between two of them.
+        # Wrapped radians of the measured pose out.
+        if self.arm.cyclic_running:
+            raise RuntimeError("release() the torque loop before an angular move")
+        path_deg = [[float(v) for v in np.degrees(q) % 360.0] for q in path]
+        start = self.arm.get_measured_joint_angles()
+        if crosses_wrap([list(start), *path_deg]):
+            for angles in path_deg:
+                self.arm.move_angular(angles)
+        else:
+            durations = angular_waypoint_durations(start, path_deg, speed_deg_s, 0.3)
+            self.arm.move_angular_waypoints(path_deg, durations)
         measured = np.radians(self.arm.get_measured_joint_angles())
         return [float(v) for v in self.radians_clip(measured)]
 

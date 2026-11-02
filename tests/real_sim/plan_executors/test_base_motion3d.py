@@ -6,6 +6,7 @@ validation, empty trajectory, etc.) are also tested against both subclasses.
 """
 
 import logging
+import math
 
 import numpy as np
 import pytest
@@ -111,6 +112,18 @@ def test_pure_pursuit_clamps_to_final_when_path_is_short():
     real_action, _ = executor.step(state)
     assert real_action.base_pose_target_map.x == pytest.approx(1.05)
     assert real_action.base_pose_target_map.y == pytest.approx(1.95)
+
+
+def test_pure_pursuit_turns_in_place_when_the_path_has_no_length():
+    """A pure rotation (the bin dump's quarter turn) has a zero-length path: the
+    target is the final heading, not the start's, or the base never turns."""
+    state = _make_state(base_xytheta=(1.0, 2.0, 0.0))
+    executor = PurePursuitBaseMotion3DPlanExecutor()
+    executor.set_trajectory([(state, _base_action(drot=math.pi / 2))])
+
+    real_action, _ = executor.step(state)
+    assert real_action.base_pose_target_map.x == pytest.approx(1.0)
+    assert real_action.base_pose_target_map.theta() == pytest.approx(math.pi / 2)
 
 
 def test_pure_pursuit_commands_lookahead_along_long_path():
