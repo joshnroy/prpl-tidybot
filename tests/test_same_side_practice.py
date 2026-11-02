@@ -208,12 +208,13 @@ def test_the_collision_check_refuses_a_gripper_over_a_wall():
         assert (
             arm_bin_collision(grasp, geom, base, _bin_fit(), in_bin) is not None
         ) == (hits), cube
+    rim = _bin_fit().height
     high = top_down_joint_targets(
         *arm_frame_target(base, (BIN[0] + 0.15, BIN[1]), geom),
         0.0,
-        dataclasses.replace(geom, hover_height=0.30),
+        dataclasses.replace(geom, hover_height=rim + 0.05),
     )[0]
-    assert forward_kinematics(high, geom)[0][2] > geom.floor_z + 0.3
+    assert forward_kinematics(high, geom)[0][2] > geom.floor_z + rim
     assert arm_bin_collision(high, geom, base, _bin_fit(), in_bin) is None
 
 

@@ -208,14 +208,17 @@ pick:
 # stand anywhere on the floor; the ceiling cameras find it by its darkness against
 # the floor (by the cardboard's colour saturation) and fit this box's silhouette.
 bin:
-  # Outer footprint (length along the bin's own x / yaw, width across), rim height,
-  # cardboard thickness, metres (2026-10-20): the rim from a photo against a 10.2 cm
-  # Leatherman, the footprint fitted to the cardboard in the calibrated ceiling camera
-  # (IoU 0.99, within 1 cm of an ArUco marker placed in its centre).
-  length: 0.39
-  width: 0.29
-  height: 0.21
+  # The blue deskside recycling bin (Rubbermaid FG295673BLUE; the cardboard box of
+  # 2026-10-20, 0.39 x 0.29 x 0.21, is retired). Rim footprint (length along the bin's
+  # own x / yaw, width across) and rim height from the spec sheet, metres; the walls
+  # taper to a narrower base, fitted in the calibrated ceiling camera (2026-11-02,
+  # IoU 0.915 single view, against 0.796 for straight walls; not yet pinned exactly).
+  length: 0.365
+  width: 0.26
+  height: 0.384
   wall: 0.005
+  base_length: 0.29
+  base_width: 0.19
   # A cube scores only when its centre is inside the walls by this much on every
   # side: a scoring region strictly inside the bin, as Tossing3D's.
   in_bin_margin: 0.05
@@ -224,11 +227,13 @@ bin:
   # A pixel is bin when darker than this times the local floor. In the real frame
   # the lit outer wall read ~0.73 of the floor beside it, the inside ~0.3.
   darkness: 0.85
-  # The bin is the pixels whose HSV saturation exceeds this: the cardboard, not its
-  # shadow on the floor, which the darkness mask also counts (2026-10-20: floor ~80,
-  # shadow ~80-100, cardboard ~160-200; the darkness fit sat 2 cm off the ArUco marker
-  # in the bin's centre, this one within 1 cm). null falls back to darkness.
-  min_saturation: 130.0
+  # The bin is the pixels whose OpenCV hue lies in hue_range with at least
+  # min_saturation: the blue bin read H ~127 against a floor at ~10, the dark mats and
+  # the red bottle label fail it, and the floor's saturation (~92) overlaps the bin's
+  # shaded side so saturation alone cannot separate them (2026-11-02). null hue_range
+  # with a min_saturation is the saturation mask; both null fall back to darkness.
+  hue_range: [100, 145]
+  min_saturation: 50.0
   min_iou: 0.7
   num_frames: 10
   # The real bin's detector: saturation (the masks above, fitted as a silhouette) or
@@ -261,6 +266,9 @@ bin:
       width: ${bin.width}
       height: ${bin.height}
       wall: ${bin.wall}
+      base_length: ${bin.base_length}
+      base_width: ${bin.base_width}
+      hue_range: ${bin.hue_range}
       search_bounds: ${bin.search_bounds}
       darkness: ${bin.darkness}
       min_saturation: ${bin.min_saturation}
@@ -269,6 +277,31 @@ bin:
       method: ${bin.method}
       rim_min_score: ${bin.rim_min_score}
       rim_max_darkness: ${bin.rim_max_darkness}
+
+# The bin dump (skill_server dump_bin; prpl_tidybot.bin_pour): grasp the near rim,
+# lift, turn a quarter turn, tip over, put back. The simulator's controller stands
+# 0.76 m off and lifts 0.48 m; from 0.76 m the Gen3 reaches only ~90 degrees of tip
+# within its joint limits (joint 6 +-119.7, joint 4 +-147.3), so the real one prefers
+# 0.84 m (120 degrees), trying the others in order when that does not solve.
+dump_bin:
+  standoff: 0.84
+  standoff_options: [0.80, 0.88, 0.92, 0.76]
+  # The pinch point's height while the bin is up: the blue bin (rim 0.384 m) is then
+  # lifted 0.48 m, as in the simulator.
+  tip_height: 0.834
+  min_lift: 0.2
+  tilt_deg: 120.0
+  tilt_step_deg: 10.0
+  lift_step: 0.08
+  # Pinch point inside the wall's outer face (the rolled lip) and below the rim.
+  rim_inset: 0.012
+  below_rim: 0.03
+  hover: 0.15
+  empty_s: 2.0
+  swing_margin: 0.3
+  # A reading at or above this closed on nothing (closed on nothing reads ~1.0; the
+  # rim's thin wall reads close to it: measure on the robot and tighten).
+  held_max: 0.97
 
 # Stop after the pick, holding the cube (then the reset prompt).
 skip_toss: false
