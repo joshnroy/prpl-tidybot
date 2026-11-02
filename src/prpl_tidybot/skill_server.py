@@ -107,7 +107,7 @@ from prpl_tidybot.aimed_toss import (
     aimed_toss_pose,
     plan_aimed_toss,
 )
-from prpl_tidybot.bin_localizer import BinFit, ConstantBinSource, cube_in_bin
+from prpl_tidybot.bin_localizer import BinFit, cube_in_bin
 from prpl_tidybot.bin_pour import BinPourGeometry
 from prpl_tidybot.interfaces.arm_interface import ArmInterface, ArmMotionAborted
 from prpl_tidybot.interfaces.base_interface import RealBaseInterface

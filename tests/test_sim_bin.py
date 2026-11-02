@@ -4,6 +4,7 @@ set down. The arm is moved through the real dump plan's joint targets."""
 
 import math
 
+import mujoco  # type: ignore[import-untyped]
 import numpy as np
 import pytest
 
@@ -172,8 +173,6 @@ def test_a_bottle_grasp_needs_the_pads_across_its_axis():
         # along c + 90 degrees.
         quat = _down_quat(pads_yaw - math.pi / 2)
         rot = np.empty(9)
-        import mujoco  # pylint: disable=import-outside-toplevel
-
         mujoco.mju_quat2Mat(  # pylint: disable=no-member
             rot, np.array([quat[3], quat[0], quat[1], quat[2]])
         )
