@@ -84,6 +84,10 @@ class BinPourGeometry:  # pylint: disable=too-many-instance-attributes
     swing_margin: float = 0.3
     # The contents must land at least this far from the turned base's centre.
     pour_clearance: float = 0.45
+    # Each onboard move interpolates in joint space and stops at its goal, so a stage
+    # keeps only the waypoints that hold the bin's rim within this of the finely
+    # planned path (the 16-waypoint roll was 16 stops).
+    path_tolerance: float = 0.02
 
 
 @dataclass(frozen=True)
@@ -96,6 +100,8 @@ class PourStage:
     arm: tuple[tuple[float, ...], ...]
     gripper: float
     hold_s: float = 0.0
+    # The finely planned waypoints ``arm`` was simplified from.
+    fine: tuple[tuple[float, ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -267,15 +273,76 @@ def _arm_stages(  # pylint: disable=too-many-arguments,too-many-positional-argum
         tip.append(tool_joints((x, y, z_up), _rot_x(a) @ down, geom, (tip or lift)[-1]))
     untip = tip[-2::-1] + [lift[-1]]
     lower = lift[-2::-1] + rim
+
+    def keep(start: list[float], fine: list[list[float]]) -> list[list[float]]:
+        return simplify_path(start, fine, geom, pour, across, side, bin_fit)
+
     return {
         "hover": [hover],
         "rim": rim,
-        "lift": lift,
-        "tip": tip,
-        "untip": untip,
-        "lower": lower,
+        "lift": keep(rim[-1], lift),
+        "tip": keep(lift[-1], tip),
+        "untip": keep(tip[-1], untip),
+        "lower": keep(lift[-1], lower),
         "withdraw": [hover],
+        "lift_fine": lift,
+        "tip_fine": tip,
+        "untip_fine": untip,
+        "lower_fine": lower,
     }
+
+
+def densify(path: Sequence[Sequence[float]], per_segment: int = 6) -> list[list[float]]:
+    """The planned path between its waypoints too: each segment sampled along the
+    straight joint-space line the fine IK steps follow."""
+    out: list[list[float]] = [list(path[0])]
+    for a, b in zip(path, path[1:]):
+        step = (np.asarray(b) - np.asarray(a) + np.pi) % (2 * np.pi) - np.pi
+        for u in np.linspace(0.0, 1.0, per_segment + 1)[1:]:
+            out.append([float(v) for v in np.asarray(a) + u * step])
+    return out
+
+
+def simplify_path(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    start: Sequence[float],
+    fine: list[list[float]],
+    geom: TopDownPickGeometry,
+    pour: BinPourGeometry,
+    across: float,
+    side: int,
+    bin_fit: BinFit,
+) -> list[list[float]]:
+    """The fewest of ``fine``'s waypoints (always its last) such that the arm, moving
+    straight in joint space from ``start`` to each in turn, holds the bin's rim within
+    ``path_tolerance`` of the finely planned path (from ``start`` through ``fine``,
+    densified), and every joint inside its limits."""
+    lo, hi = joint_limits(geom)
+
+    def rim(q: Sequence[float]) -> NDArray[np.float64]:
+        return bin_points_in_hand(q, geom, pour, across, side, bin_fit)[1]
+
+    reference = [rim(q) for q in densify([list(start), *fine])]
+
+    def straight_ok(a: Sequence[float], b: Sequence[float]) -> bool:
+        step = (np.asarray(b) - np.asarray(a) + np.pi) % (2 * np.pi) - np.pi
+        for u in np.linspace(0.0, 1.0, 11):
+            q = np.asarray(a) + u * step
+            if np.any(q < lo) or np.any(q > hi):
+                return False
+            gap = min(float(np.linalg.norm(rim(q) - f)) for f in reference)
+            if gap > pour.path_tolerance:
+                return False
+        return True
+
+    kept: list[list[float]] = []
+    anchor, i = list(start), 0
+    while i < len(fine):
+        j = len(fine) - 1
+        while j > i and not straight_ok(anchor, fine[j]):
+            j -= 1
+        kept.append(list(fine[j]))
+        anchor, i = list(fine[j]), j + 1
+    return kept
 
 
 def plan_bin_pour(  # pylint: disable=too-many-locals
@@ -385,9 +452,16 @@ def _plan_at(  # pylint: disable=too-many-arguments,too-many-positional-argument
             gripper: float,
             base: tuple[float, float, float] = stand,
             hold: float = 0.0,
+            stages_arm: dict[str, list[list[float]]] = arm,
         ) -> PourStage:
+            fine = stages_arm.get(f"{name}_fine", waypoints)
             return PourStage(
-                name, base, tuple(tuple(q) for q in waypoints), gripper, hold
+                name,
+                base,
+                tuple(tuple(q) for q in waypoints),
+                gripper,
+                hold,
+                tuple(tuple(q) for q in fine),
             )
 
         held = [arm["lift"][-1]]
