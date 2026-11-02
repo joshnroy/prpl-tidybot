@@ -1132,7 +1132,6 @@ def _dump_bin(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     closed on nothing, so the gripper opens and withdraws before anything is lifted.
     The base turns with the bin in hand without the workspace check: the plan already
     vetted the turned pose, and the bin, lifted, clears the floor's obstacles."""
-    held_max = float((cfg.get("dump_bin") or {}).get("held_max", 0.97))
     stages: list[dict[str, Any]] = record.setdefault("stages", [])
     step(
         f"Drive to the dump standoff ({plan.stand[0]:+.3f}, {plan.stand[1]:+.3f}, "
@@ -1148,38 +1147,69 @@ def _dump_bin(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     )
     mover.stop = stop
     mover.begin()
-    planned = plan.stand
     try:
-        for stage in plan.stages:
-            step(f"dump: {stage.name}")
-            entry: dict[str, Any] = {"stage": stage.name}
-            stages.append(entry)
-            if any(abs(a - b) > 1e-6 for a, b in zip(stage.base, planned)):
-                # Each drive tick streams a hold to the arm, which only the torque
-                # loop reads: hand the arm back to it for the turn (under the onboard
-                # controller the queue fills and the arm server blocks for good).
-                mover.end()
-                _drive_to(real_env, list(stage.base), None, stop, None)
-                mover.begin()
-                planned = stage.base
-            if stage.name in ("close", "open"):
-                reading = read(mover.gripper(stage.gripper))
-                entry["gripper"] = reading
-                if stage.name == "close":
-                    record["gripper"] = reading
-                    if reading >= held_max:
-                        mover.gripper(0.0)
-                        stages.append({"stage": "withdraw"})
-                        mover.move("dump_withdraw", list(plan.stages[0].arm[-1]))
-                        return f"no grip on the bin's rim (gripper read {reading:.2f})"
-                continue
-            if not mover.move_path(f"dump_{stage.name}", [list(q) for q in stage.arm]):
-                held = " (the bin is still held)" if stage.gripper > 0.5 else ""
-                return f"dump: {stage.name} did not arrive{held}"
-            if stage.hold_s:
-                time.sleep(stage.hold_s)
+        try:
+            failure = _run_dump_stages(
+                cfg, real_env, mover, step, plan, record, read, stop
+            )
+        except (ValueError, RuntimeError) as e:
+            # An arm or base error mid-dump is a stop-short reply, not a raise. Until
+            # the bin is up it can be let go where it stands; once lifted it stays
+            # held (opening would drop it), for the person.
+            lifted = any(s["stage"] == "turn" for s in stages)
+            if lifted:
+                return f"dump: {e} (the bin is still held)"
+            mover.gripper(0.0)
+            stages.append({"stage": "withdraw"})
+            mover.move("dump_withdraw", list(plan.stages[0].arm[-1]))
+            return f"dump: {e}"
+        return failure
     finally:
         mover.end()
+
+
+def _run_dump_stages(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    cfg: DictConfig,
+    real_env: Any,
+    mover: "_Mover",
+    step: Callable[[str], None],
+    plan: BinPourPlan,
+    record: dict[str, Any],
+    read: Callable[[float], float],
+    stop: threading.Event | None,
+) -> str | None:
+    """The dump's stages (see :func:`_dump_bin`); returns why it stopped short."""
+    held_max = float((cfg.get("dump_bin") or {}).get("held_max", 0.97))
+    stages: list[dict[str, Any]] = record["stages"]
+    planned = plan.stand
+    for stage in plan.stages:
+        step(f"dump: {stage.name}")
+        entry: dict[str, Any] = {"stage": stage.name}
+        stages.append(entry)
+        if any(abs(a - b) > 1e-6 for a, b in zip(stage.base, planned)):
+            # Each drive tick streams a hold to the arm, which only the torque
+            # loop reads: hand the arm back to it for the turn (under the onboard
+            # controller the queue fills and the arm server blocks for good).
+            mover.end()
+            _drive_to(real_env, list(stage.base), None, stop, None)
+            mover.begin()
+            planned = stage.base
+        if stage.name in ("close", "open"):
+            reading = read(mover.gripper(stage.gripper))
+            entry["gripper"] = reading
+            if stage.name == "close":
+                record["gripper"] = reading
+                if reading >= held_max:
+                    mover.gripper(0.0)
+                    stages.append({"stage": "withdraw"})
+                    mover.move("dump_withdraw", list(plan.stages[0].arm[-1]))
+                    return f"no grip on the bin's rim (gripper read {reading:.2f})"
+            continue
+        if not mover.move_path(f"dump_{stage.name}", [list(q) for q in stage.arm]):
+            held = " (the bin is still held)" if stage.gripper > 0.5 else ""
+            return f"dump: {stage.name} did not arrive{held}"
+        if stage.hold_s:
+            time.sleep(stage.hold_s)
     return None
 
 

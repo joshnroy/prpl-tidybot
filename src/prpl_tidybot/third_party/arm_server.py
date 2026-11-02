@@ -148,7 +148,7 @@ class Arm:
         measured = np.radians(self.arm.get_measured_joint_angles())
         return [float(v) for v in self.radians_clip(measured)]
 
-    def move_joints_trajectory(self, path, speed_deg_s=20.0):
+    def move_joints_trajectory(self, path, speed_deg_s=30.0, accel_deg_s2=80.0):
         # One continuous onboard trajectory through the waypoints (radians), for
         # multi-waypoint moves that would otherwise stop at each point; falls back to
         # one move per waypoint when a joint would pass 0/360 between two of them.
@@ -157,12 +157,20 @@ class Arm:
             raise RuntimeError("release() the torque loop before an angular move")
         path_deg = [[float(v) for v in np.degrees(q) % 360.0] for q in path]
         start = self.arm.get_measured_joint_angles()
-        if crosses_wrap([list(start), *path_deg]):
+        separate = crosses_wrap([list(start), *path_deg])
+        if not separate:
+            durations = angular_waypoint_durations(
+                start, path_deg, speed_deg_s, accel_deg_s2, 0.3
+            )
+            try:
+                self.arm.move_angular_waypoints(path_deg, durations)
+            except ValueError as e:
+                # Rejected by the arm's validation, before moving: stop and go.
+                print(f"Waypoint trajectory rejected, moving waypoint by waypoint: {e}")
+                separate = True
+        if separate:
             for angles in path_deg:
                 self.arm.move_angular(angles)
-        else:
-            durations = angular_waypoint_durations(start, path_deg, speed_deg_s, 0.3)
-            self.arm.move_angular_waypoints(path_deg, durations)
         measured = np.radians(self.arm.get_measured_joint_angles())
         return [float(v) for v in self.radians_clip(measured)]
 
