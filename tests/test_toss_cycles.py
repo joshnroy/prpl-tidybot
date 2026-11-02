@@ -733,7 +733,10 @@ def test_object_bottle_swaps_the_source_and_grasps_across_the_axis():
     assert "side" not in source
     geom = geometry_from_config(cfg.pick.top_down)
     assert geom.symmetry == pytest.approx(math.pi)
-    assert geom.wrist_yaw_offset == pytest.approx(math.pi / 2)
+    assert geom.wrist_yaw_offset == pytest.approx(0.0)
+    assert (
+        not cfg.pick.top_down.lateral_servo.enabled
+    )  # the cube servo sees the blue bin
     kwargs = _cube_source_kwargs(cfg, source)
     assert (
         kwargs["floor_bounds"]

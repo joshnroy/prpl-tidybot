@@ -232,6 +232,18 @@ def _arm_link_points(
     return links
 
 
+def finger_axis(
+    joints: Sequence[float], geom: TopDownPickGeometry
+) -> NDArray[np.float64]:
+    """The direction the 2F-85's pads open and close along (arm frame): the pinch
+    frame's x, as the robot's MuJoCo model moves them. NOT ``forward_kinematics``'
+    "closing" (the frame's y), which is 90 degrees from it: the cube, the same every
+    90 degrees, never showed the difference (2026-11-02, the first bottle pick put
+    the fingers along the bottle)."""
+    _, approach, closing = forward_kinematics(joints, geom)
+    return np.cross(closing, approach)
+
+
 def top_down_joint_targets(
     ax: float,
     ay: float,
