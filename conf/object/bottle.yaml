@@ -31,6 +31,13 @@ pick:
     lateral_servo:
       enabled: false
 
+# observe()["cube_upright"] is the cube's flat-on-a-face check, its silhouette fit's
+# IoU against skill_server.upright_min_iou (0.75). A lying bottle has no other rest
+# the pick sees (a standing one is not found at all) and fits at ~0.75 on a good
+# frame, so every bottle found on the floor is resting.
+skill_server:
+  upright_min_iou: 0.0
+
 # mode=sim draws and rests the bottle lying (its radius off the floor).
 sim:
   object: bottle

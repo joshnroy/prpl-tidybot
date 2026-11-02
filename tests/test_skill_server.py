@@ -212,6 +212,28 @@ def test_observe_has_exactly_the_contracts_fields_as_plain_values(skills):
     assert obs["toss_direction"] == pytest.approx(0.0)
 
 
+@pytest.mark.parametrize("bottle, upright", [(False, False), (True, True)])
+def test_a_lying_bottle_is_resting_whatever_its_cube_fit(monkeypatch, bottle, upright):
+    """``cube_upright`` is the cube's flat-on-a-face check (its silhouette fit's IoU);
+    a lying bottle has no other graspable rest, and fits at ~0.75 on a good frame, so
+    with +object=bottle any bottle found on the floor counts as resting (2026-11-02:
+    4/12 real floor sightings read not upright)."""
+    from prpl_tidybot import skill_server  # pylint: disable=import-outside-toplevel
+
+    extra = {"+object": "bottle", "pick.top_down.lateral_servo.enabled": "false"}
+    cfg = _cfg(**extra) if bottle else _cfg()
+    skills = build_skills(cfg)
+    look = skill_server._Look(  # pylint: disable=protected-access
+        skills.bin_source.localize(),
+        {"x": 0.6, "y": -0.5, "yaw_deg": 0.0, "in_bin": False, "iou": 0.70},
+        "",
+        skills.motions,
+    )
+    monkeypatch.setattr(skills, "_look_now", lambda: look)
+    assert skills.observe()["cube_upright"] is upright
+    skills.close()
+
+
 def test_observe_looks_for_the_cube_inside_the_bin_first(skills, monkeypatch):
     """Inside the bin the cube is dim and beyond the floor search (run 31): the bin's
     box is searched first; the cube found there is inside the bin and, 2 cm from its
