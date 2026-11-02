@@ -45,20 +45,10 @@ pick:
 bin:
   # Both spots: the drivable box plus 0.3 m.
   search_bounds: [-1.8, 2.0, -1.8, 1.8]
-  # The rim-edge detector (toss_cycles.yaml's bin.method): replaying the 2026-10-20
-  # pilot's 131 looks (51 saved frame sets, 80 video windows) it found the bin in
-  # 131/131 within 2.6 cm, returned no bin in 131/131 of them with the bin hidden
-  # and 8/8 with it against the wall, and is unchanged under dimmer, brighter,
-  # paler and warmer lighting. method: saturation falls back to the thresholds below.
-  method: rim_edges
-  # method: saturation's HSV saturation threshold per ceiling camera (the lab's
-  # camera_serials): the top camera sees the far spot, the bottom one the close spot.
-  # Replaying the 2026-10-20 pilot's frames, 160/130 found the bin in 57/57 far and
-  # 41/41 close looks. One number for both cameras also works: 140 found 56/57 far,
-  # 41/41 close (the pilot ran on it).
-  min_saturation:
-    AD8A29AE: 160.0
-    5A5C29AE: 130.0
+  # The blue recycling bin by hue and saturation (toss_cycles.yaml's bin: block), as on
+  # the 2026-11-02 real runs. rim_edges' thresholds were frozen on the retired
+  # cardboard box's 2026-10-20 replay and are not measured on this bin.
+  method: saturation
   # A real cube cannot rest on the rim: a centre inside the walls is in the bin
   # (pilot run9's far throw, 91.5 mm off-centre across the 0.29 m bin, did not score
   # with toss_cycles' 5 cm margin).

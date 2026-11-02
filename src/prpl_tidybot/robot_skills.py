@@ -28,6 +28,12 @@ from omegaconf import DictConfig
 
 from prpl_tidybot.aimed_toss import Workspace
 from prpl_tidybot.bin_localizer import BinFit, cube_in_bin
+from prpl_tidybot.bin_pour import (
+    BinPourGeometry,
+    BinPourPlan,
+    plan_bin_pour,
+    pour_point,
+)
 from prpl_tidybot.gripper_shape import (
     FINGER_LINKS,
     GRIPPER_HOUSING,
@@ -1040,6 +1046,132 @@ def _place_top_down(  # pylint: disable=too-many-arguments,too-many-positional-a
             return "place: the set-down did not arrive (the cube is still held)"
         mover.gripper(0.0)
         mover.move("place_up", hover)
+    finally:
+        mover.end()
+    return None
+
+
+def pour_geometry_from_config(cfg: Any) -> BinPourGeometry:
+    """Build the dump's geometry from a ``dump_bin`` config block (defaults fill
+    gaps; ``*_deg`` keys in degrees)."""
+    kwargs: dict[str, Any] = {}
+    for f in dataclasses.fields(BinPourGeometry):
+        if cfg is not None and f.name == "standoff_options" and f.name in cfg:
+            kwargs[f.name] = tuple(float(v) for v in cfg[f.name])
+        elif cfg is not None and f.name in cfg:
+            kwargs[f.name] = float(cfg[f.name])
+        elif cfg is not None and f"{f.name}_deg" in cfg:
+            kwargs[f.name] = math.radians(float(cfg[f"{f.name}_deg"]))
+    return BinPourGeometry(**kwargs)
+
+
+def plan_dump(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    robot: Sequence[float],
+    bin_fit: BinFit | None,
+    geom: TopDownPickGeometry,
+    pour: BinPourGeometry,
+    workspace: Workspace,
+    holding: bool,
+) -> tuple[BinPourPlan | None, str | None]:
+    """The bin dump the robot would make from ``robot``, or None and why it may not
+    start (nothing moves either way): no bin, the hand not empty, no standoff the
+    workspace accepts (across the barrier, off the drivable box) or no IK within the
+    arm's limits. Shared by the real skill, its dry run and the fake robot."""
+    if bin_fit is None:
+        return None, "no bin found"
+    if holding:
+        return None, "holding the cube: the hand must be empty to grasp the bin"
+    try:
+        plan = plan_bin_pour(
+            bin_fit,
+            robot,
+            geom,
+            pour,
+            tuple(workspace.floor_bounds),
+            workspace.valid(bin_fit),
+        )
+    except ValueError as e:
+        return None, str(e)
+    return plan, None
+
+
+def dump_summary(
+    plan: BinPourPlan,
+    bin_fit: BinFit,
+    geom: TopDownPickGeometry,
+    pour: BinPourGeometry,
+) -> dict[str, Any]:
+    """The plan's fields in a skill reply: plain floats and lists."""
+    return {
+        "stand": [float(v) for v in plan.stand],
+        "face": int(plan.face),
+        "turn_deg": math.degrees(plan.turn),
+        "pour_point": [float(v) for v in pour_point(plan, bin_fit, geom, pour)],
+    }
+
+
+def _dump_bin(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    cfg: DictConfig,
+    real_env: Any,
+    arm: ArmInterface,
+    geom: TopDownPickGeometry,
+    step: Callable[[str], None],
+    plan: BinPourPlan,
+    bin_fit: BinFit,
+    record: dict[str, Any],
+    read: Callable[[float], float] = float,
+    workspace: Workspace | None = None,
+    stop: threading.Event | None = None,
+) -> str | None:
+    """Run a planned bin dump (:func:`plan_dump`): grasp the near rim, lift, turn,
+    tip the bin over to empty it, and put it back where it was. Returns why it stopped
+    short, or None once the bin is back down and released; ``record["stages"]`` lists
+    what ran and ``record["gripper"]`` the reading on the rim.
+
+    The grasp is checked after closing: a reading at or above ``dump_bin.held_max``
+    closed on nothing, so the gripper opens and withdraws before anything is lifted.
+    The base turns with the bin in hand without the workspace check: the plan already
+    vetted the turned pose, and the bin, lifted, clears the floor's obstacles."""
+    held_max = float((cfg.get("dump_bin") or {}).get("held_max", 0.97))
+    stages: list[dict[str, Any]] = record.setdefault("stages", [])
+    step(
+        f"Drive to the dump standoff ({plan.stand[0]:+.3f}, {plan.stand[1]:+.3f}, "
+        f"{math.degrees(plan.stand[2]):+.0f} deg)"
+    )
+    base = _drive_to(real_env, list(plan.stand), workspace, stop, bin_fit)
+    td = cfg.pick.top_down
+    moves: list[dict[str, Any]] = record.setdefault("moves", [])
+    mover: _Mover = (
+        _AngularMover(arm, td, geom, moves)
+        if td.get("arm_controller", "compliant") == "angular"
+        else _CompliantMover(arm, td, geom, moves, cfg.arm_home)
+    )
+    mover.stop = stop
+    mover.begin()
+    try:
+        for stage in plan.stages:
+            step(f"dump: {stage.name}")
+            entry: dict[str, Any] = {"stage": stage.name}
+            stages.append(entry)
+            if any(abs(a - b) > 1e-6 for a, b in zip(stage.base, base)):
+                base = _drive_to(real_env, list(stage.base), None, stop, None)
+            if stage.name in ("close", "open"):
+                reading = read(mover.gripper(stage.gripper))
+                entry["gripper"] = reading
+                if stage.name == "close":
+                    record["gripper"] = reading
+                    if reading >= held_max:
+                        mover.gripper(0.0)
+                        stages.append({"stage": "withdraw"})
+                        mover.move("dump_withdraw", list(plan.stages[0].arm[-1]))
+                        return f"no grip on the bin's rim (gripper read {reading:.2f})"
+                continue
+            for k, q in enumerate(stage.arm):
+                if not mover.move(f"dump_{stage.name}_{k}", list(q)):
+                    held = " (the bin is still held)" if stage.gripper > 0.5 else ""
+                    return f"dump: {stage.name} did not arrive{held}"
+            if stage.hold_s:
+                time.sleep(stage.hold_s)
     finally:
         mover.end()
     return None
