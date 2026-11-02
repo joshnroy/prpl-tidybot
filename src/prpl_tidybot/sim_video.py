@@ -66,8 +66,13 @@ class SimMarkers:
     floor_bounds: tuple[float, float, float, float] | None = None
     bin_box: tuple[float, float, float, float] | None = None
     # A bin with walls (x, y, yaw, length, width, height, wall): drawn, and the arm's
-    # clearance to its walls reported per step.
+    # clearance to its walls reported per step. It is drawn where each sample puts it
+    # (a held bin moves); this pose is where it starts.
     bin: tuple[float, float, float, float, float, float, float] | None = None
+    # The bin's base footprint (length, width) when its walls taper, else None.
+    bin_base: tuple[float, float] | None = None
+    # What is picked: "cube" (5 cm) or "bottle" (20 oz, lying).
+    object: str = "cube"
 
     @classmethod
     def from_config(cls, cfg: DictConfig) -> SimMarkers:
@@ -87,11 +92,16 @@ class SimMarkers:
                 float(b.height),
                 float(b.wall),
             )
+        base = None
+        if walls is not None and cfg.bin.get("base_length") is not None:
+            base = (float(cfg.bin.base_length), float(cfg.bin.base_width))
         return cls(
             toss_pose=tuple(float(v) for v in cfg.toss_pose),  # type: ignore[arg-type]
             floor_bounds=None if floor is None else tuple(float(v) for v in floor),  # type: ignore[arg-type]
             bin_box=None if box is None else tuple(float(v) for v in box),  # type: ignore[arg-type]
             bin=walls,
+            bin_base=base,
+            object=str(cfg.get("sim", {}).get("object", "cube")),
         )
 
     def bin_bounds(self) -> tuple[float, float, float, float] | None:
@@ -138,13 +148,31 @@ class SimScene:
         )
         self._add_markers(world, markers)
         cube = world.add_body(name="cube", mocap=True)
-        cube.add_geom(
-            type=mujoco.mjtGeom.mjGEOM_BOX,
-            size=[0.025] * 3,
-            rgba=[0.95, 0.55, 0.05, 1],
-            contype=0,
-            conaffinity=0,
-        )
+        if markers.object == "bottle":
+            # Lying along its body x: clear plastic, the red label round its middle.
+            for half_length, radius, rgba in (
+                (0.10, 0.033, [0.85, 0.9, 0.95, 0.55]),
+                (0.05, 0.0335, [0.85, 0.08, 0.08, 1.0]),
+            ):
+                cube.add_geom(
+                    type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+                    size=[radius, half_length, 0],
+                    quat=[math.cos(math.pi / 4), 0, math.sin(math.pi / 4), 0],
+                    rgba=rgba,
+                    contype=0,
+                    conaffinity=0,
+                )
+        else:
+            cube.add_geom(
+                type=mujoco.mjtGeom.mjGEOM_BOX,
+                size=[0.025] * 3,
+                rgba=[0.95, 0.55, 0.05, 1],
+                contype=0,
+                conaffinity=0,
+            )
+        self._bin_mocap: int | None = None
+        if markers.bin is not None:
+            _add_bin(world, markers)
         self.model = spec.compile()
         self.data = mujoco.MjData(self.model)
         m = self.model
@@ -179,6 +207,10 @@ class SimScene:
         self.bin_walls = [
             g for g in range(m.ngeom) if (m.geom(g).name or "").startswith("bin_wall")
         ]
+        if markers.bin is not None:
+            self._bin_mocap = int(m.body_mocapid[m.body("bin").id])
+            bx, by, yaw = markers.bin[:3]
+            self._bin_start = (bx, by, yaw)
 
     @staticmethod
     def _add_markers(world: Any, markers: SimMarkers) -> None:
@@ -205,28 +237,6 @@ class SimScene:
                 contype=0,
                 conaffinity=0,
             )
-        if markers.bin is not None:
-            bx, by, yaw, length, width, height, wall = markers.bin
-            c, s = math.cos(yaw), math.sin(yaw)
-            quat = [math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)]
-            walls = [
-                ((0.0, sign * (width - wall) / 2), (length / 2, wall / 2))
-                for sign in (1, -1)
-            ] + [
-                ((sign * (length - wall) / 2, 0.0), (wall / 2, width / 2))
-                for sign in (1, -1)
-            ]
-            for k, ((lx, ly), (hx, hy)) in enumerate(walls):
-                world.add_geom(
-                    name=f"bin_wall_{k}",
-                    type=mujoco.mjtGeom.mjGEOM_BOX,
-                    pos=[bx + c * lx - s * ly, by + s * lx + c * ly, height / 2],
-                    quat=quat,
-                    size=[hx, hy, height / 2],
-                    rgba=[0.72, 0.55, 0.35, 1.0],
-                    contype=0,
-                    conaffinity=0,
-                )
         x, y, theta = markers.toss_pose
         world.add_geom(
             type=mujoco.mjtGeom.mjGEOM_CYLINDER,
@@ -245,7 +255,7 @@ class SimScene:
 
     def set(self, sample: tuple[Any, ...]) -> None:
         """Pose the model as in one of the world's samples."""
-        _, base, q, gripper, cube, *_ = sample
+        _, base, q, gripper, cube, *rest = sample
         qpos = self.data.qpos
         qpos[self._base_adr[0]], qpos[self._base_adr[1]] = base[0], base[1]
         qpos[self._th_adr] = base[2]
@@ -261,7 +271,66 @@ class SimScene:
             pos, yaw = np.asarray(cube[:3]), float(cube[3])
         self.data.mocap_pos[0] = pos
         self.data.mocap_quat[0] = [math.cos(yaw / 2), 0, 0, math.sin(yaw / 2)]
+        if self._bin_mocap is not None:
+            pose = rest[2] if len(rest) > 2 else None
+            if pose is None:
+                bx, by, byaw = self._bin_start
+                pose = np.eye(4)
+                pose[:3, :3] = [
+                    [math.cos(byaw), -math.sin(byaw), 0],
+                    [math.sin(byaw), math.cos(byaw), 0],
+                    [0, 0, 1],
+                ]
+                pose[:2, 3] = (bx, by)
+            quat = np.empty(4)
+            mujoco.mju_mat2Quat(quat, np.asarray(pose)[:3, :3].flatten())
+            self.data.mocap_pos[self._bin_mocap] = np.asarray(pose)[:3, 3]
+            self.data.mocap_quat[self._bin_mocap] = quat
         mujoco.mj_forward(self.model, self.data)
+
+
+def _add_bin(world: Any, markers: SimMarkers) -> None:
+    """The bin as one movable body (its origin at the base's centre): four walls,
+    leaning in to the base when it tapers, and a floor. Blue, as the recycling bin."""
+    assert markers.bin is not None
+    _, _, _, length, width, height, wall = markers.bin
+    base_length, base_width = markers.bin_base or (length, width)
+    body = world.add_body(name="bin", mocap=True)
+    rgba = [0.1, 0.25, 0.8, 1.0]
+    walls = []
+    for sign in (1, -1):
+        lean = math.atan2((width - base_width) / 2, height)
+        mid = (width + base_width) / 4 - wall / 2
+        walls.append(((0.0, sign * mid), (length + base_length) / 4, -sign * lean, "x"))
+        lean = math.atan2((length - base_length) / 2, height)
+        mid = (length + base_length) / 4 - wall / 2
+        walls.append(((sign * mid, 0.0), (width + base_width) / 4, sign * lean, "y"))
+    for k, ((lx, ly), half_span, lean, along) in enumerate(walls):
+        slant = height / math.cos(lean)
+        if along == "x":  # a side wall: leans about the bin's x
+            size = [half_span, wall / 2, slant / 2]
+            quat = [math.cos(lean / 2), math.sin(lean / 2), 0, 0]
+        else:  # an end wall: leans about the bin's y
+            size = [wall / 2, half_span, slant / 2]
+            quat = [math.cos(lean / 2), 0, math.sin(lean / 2), 0]
+        body.add_geom(
+            name=f"bin_wall_{k}",
+            type=mujoco.mjtGeom.mjGEOM_BOX,
+            pos=[lx, ly, height / 2],
+            quat=quat,
+            size=size,
+            rgba=rgba,
+            contype=0,
+            conaffinity=0,
+        )
+    body.add_geom(
+        type=mujoco.mjtGeom.mjGEOM_BOX,
+        pos=[0, 0, wall / 2],
+        size=[base_length / 2, base_width / 2, wall / 2],
+        rgba=rgba,
+        contype=0,
+        conaffinity=0,
+    )
 
 
 def _wall_gap(model: Any, data: Any, wall: int, geom: int, fromto: Any) -> float:

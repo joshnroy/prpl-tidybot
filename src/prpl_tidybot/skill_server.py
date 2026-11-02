@@ -109,6 +109,7 @@ from prpl_tidybot.aimed_toss import (
 )
 from prpl_tidybot.bin_localizer import BinFit, ConstantBinSource, cube_in_bin
 from prpl_tidybot.bin_pour import BinPourGeometry
+from prpl_tidybot.sim_robot import SimBinSource
 from prpl_tidybot.interfaces.arm_interface import ArmInterface, ArmMotionAborted
 from prpl_tidybot.interfaces.base_interface import RealBaseInterface
 from prpl_tidybot.motion_log import MarkerPoseReader, MotionLog, se2_xyt
@@ -1091,11 +1092,8 @@ def build_skills(
         ceiling, sleep = sim.recorder, sim.world.idle
         bin_source: Any = None
         if cfg.sim.get("bin") is not None:
-            x, y, yaw_deg = (float(v) for v in cfg.sim.bin)
-            b = cfg.bin
-            bin_source = ConstantBinSource(
-                x, y, math.radians(yaw_deg), b.length, b.width, b.height, b.wall
-            )
+            # The sim's own bin: it moves when the dump carries it, or the person.
+            bin_source = SimBinSource(sim.world)
     else:
         pipeline = cfg.env.pipelines[cfg.mode]
         real_env = hydra.utils.instantiate(pipeline.real_env, _convert_="all")

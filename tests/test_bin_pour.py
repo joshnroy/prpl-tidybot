@@ -1,7 +1,7 @@
-"""Tests for the bin pour: grasp the bin's near rim top-down, lift it, turn the base a
-quarter turn so it hangs beside where it stood, tip it over about the wall so whatever
-is inside falls out, then put it back and let go (the real counterpart of the
-simulator's ``BinPourController``)."""
+"""Tests for the bin pour: grasp a side wall's rim top-down, lift the bin, turn the base
+a quarter turn so it hangs beside where it stood, roll it over about the robot's
+forward axis so whatever is inside falls out to the robot's side, then put it back and
+let go (the real counterpart of the simulator's ``BinPourController``)."""
 
 import math
 
@@ -70,40 +70,74 @@ def test_the_stages_mirror_the_simulators_pour(plan):
     ]
 
 
-def test_the_fingers_straddle_the_near_wall_at_the_rim(plan):
-    """At the rim the tool points down, its pinch point just inside the near wall's
-    top and the fingers closing across the wall (along the robot's heading)."""
+def _across():
+    return BIN.width if PLAN_FACE[0] % 2 == 0 else BIN.length
+
+
+PLAN_FACE = [0]
+
+
+def test_the_fingers_straddle_a_side_wall_at_the_rim(plan):
+    """At the rim the tool points down, its pinch point over the middle of a side
+    wall's top (one running along the robot's forward axis), the fingers closing
+    across it (along the robot's y)."""
+    PLAN_FACE[0] = plan.face
     rim = next(s for s in plan.stages if s.name == "rim")
     pos, approach, closing = forward_kinematics(rim.arm[-1], GEOM)
-    span = BIN.width if plan.face % 2 else BIN.length
-    near_wall = plan.standoff - span / 2 + POUR.rim_inset
-    assert pos[0] + GEOM.mounting_offset == pytest.approx(near_wall, abs=0.005)
-    assert pos[1] == pytest.approx(0.0, abs=0.005)
+    assert pos[0] + GEOM.mounting_offset == pytest.approx(plan.standoff, abs=0.005)
+    assert pos[1] == pytest.approx(
+        plan.side * (_across() / 2 - POUR.rim_inset), abs=0.005
+    )
     assert pos[2] == pytest.approx(
         GEOM.floor_z + BIN.height - POUR.below_rim, abs=0.005
     )
     assert approach[2] < -0.999
-    assert abs(closing[0]) > 0.999
+    assert abs(closing[1]) > 0.999
 
 
-def test_the_tipped_bin_is_upside_down_and_away_from_the_robot(plan):
-    """After the tip the bin's bottom is above its rim and in front of the gripper,
-    so the opening faces down and the bin never swings back over the base."""
+def test_the_rolled_bin_is_upside_down_and_empties_to_the_side(plan):
+    """Rolled, the bin's bottom is above its rim and the opening has swung outward
+    past the gripped wall: the contents fall to the robot's side, not toward it."""
+    PLAN_FACE[0] = plan.face
     tip = next(s for s in plan.stages if s.name == "tip")
-    span = BIN.width if plan.face % 2 else BIN.length
-    bottom, rim_centre = bin_points_in_hand(tip.arm[-1], GEOM, POUR, span, BIN)
-    # 120 degrees of tip: the bottom ~0.18 m above the rim, the opening facing down.
-    assert bottom[2] > rim_centre[2] + 0.1
-    assert min(bottom[0], rim_centre[0]) > 0.0
+    bottom, rim_centre = bin_points_in_hand(
+        tip.arm[-1], GEOM, POUR, _across(), plan.side, BIN
+    )
+    pinch, _, _ = forward_kinematics(tip.arm[-1], GEOM)
+    assert bottom[2] > rim_centre[2] + 0.2
+    assert plan.side * rim_centre[1] > plan.side * pinch[1] + 0.05
+
+
+def test_the_bin_rolls_sideways_about_the_forward_axis(plan):
+    """As in the simulator, the bin turns over about the robot's forward axis: through
+    the roll its bottom moves across and up, never toward or away from the robot."""
+    PLAN_FACE[0] = plan.face
+    tip = next(s for s in plan.stages if s.name == "tip")
+    lift = next(s for s in plan.stages if s.name == "lift")
+    start, _ = bin_points_in_hand(lift.arm[-1], GEOM, POUR, _across(), plan.side, BIN)
+    for q in tip.arm:
+        bottom, _ = bin_points_in_hand(q, GEOM, POUR, _across(), plan.side, BIN)
+        assert abs(bottom[0] - start[0]) < 0.02
+    assert plan.side * (bottom[1] - start[1]) > 0.2
+
+
+def test_the_contents_land_clear_of_the_base(plan):
+    """Where the contents fall is ahead of the turned base's front edge, not on it."""
+    tip = next(s for s in plan.stages if s.name == "tip")
+    x, y = pour_point(plan, BIN, GEOM, POUR)
+    bx, by, theta = tip.base
+    ahead = math.cos(theta) * (x - bx) + math.sin(theta) * (y - by)
+    assert ahead > 0.274 + 0.2  # the base's half-length plus margin
 
 
 def test_the_lift_raises_the_bin_clear_of_the_floor(plan):
-    """Lifted, the pinch point is at `tip_height`: the blue bin's base 0.48 m up, the
-    simulator's lift."""
+    """Lifted, the pinch point is at `tip_height`: the blue bin's base 0.35 m up."""
+    PLAN_FACE[0] = plan.face
     lift = next(s for s in plan.stages if s.name == "lift")
-    span = BIN.width if plan.face % 2 else BIN.length
-    bottom, _ = bin_points_in_hand(lift.arm[-1], GEOM, POUR, span, BIN)
-    assert bottom[2] - GEOM.floor_z == pytest.approx(0.48, abs=0.01)
+    bottom, _ = bin_points_in_hand(lift.arm[-1], GEOM, POUR, _across(), plan.side, BIN)
+    assert bottom[2] - GEOM.floor_z == pytest.approx(
+        POUR.tip_height - (BIN.height - POUR.below_rim), abs=0.01
+    )
 
 
 def test_no_arm_move_jumps_ik_branches(plan):
@@ -153,8 +187,9 @@ def test_every_waypoint_is_within_the_arms_joint_limits(plan):
 
 
 def test_the_tip_is_far_enough_to_empty_the_bin(plan):
-    """Past 90 degrees the opening faces down; the default tips 120."""
-    assert POUR.tilt >= math.radians(110)
+    """Past 90 degrees the opening faces down; the default rolls 160 (the simulator
+    180)."""
+    assert POUR.tilt >= math.radians(150)
     assert len(next(s for s in plan.stages if s.name == "tip").arm) >= 12
 
 

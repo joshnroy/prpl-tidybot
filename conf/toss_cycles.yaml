@@ -278,19 +278,19 @@ bin:
       rim_min_score: ${bin.rim_min_score}
       rim_max_darkness: ${bin.rim_max_darkness}
 
-# The bin dump (skill_server dump_bin; prpl_tidybot.bin_pour): grasp the near rim,
-# lift, turn a quarter turn, tip over, put back. The simulator's controller stands
-# 0.76 m off and lifts 0.48 m; from 0.76 m the Gen3 reaches only ~90 degrees of tip
-# within its joint limits (joint 6 +-119.7, joint 4 +-147.3), so the real one prefers
-# 0.84 m (120 degrees), trying the others in order when that does not solve.
+# The bin dump (skill_server dump_bin; prpl_tidybot.bin_pour): grasp a side wall's
+# rim, lift, turn a quarter turn, roll the bin over about the robot's forward axis (as
+# the simulator's controller does), put back. The standoff and the quarter turn are the
+# simulator's; with the side wall gripped the Gen3 reaches the lift within its joint
+# limits only with the pinch point 0.70 m up (the simulator's ~0.83 fails), so the blue
+# bin is lifted 0.35 m, not 0.48.
 dump_bin:
-  standoff: 0.84
-  standoff_options: [0.80, 0.88, 0.92, 0.76]
-  # The pinch point's height while the bin is up: the blue bin (rim 0.384 m) is then
-  # lifted 0.48 m, as in the simulator.
-  tip_height: 0.834
+  standoff: 0.76
+  standoff_options: [0.70, 0.80, 0.84]
+  tip_height: 0.70
   min_lift: 0.2
-  tilt_deg: 120.0
+  # The simulator rolls 180; the arm reaches ~175 from 0.76 m.
+  tilt_deg: 160.0
   tilt_step_deg: 10.0
   lift_step: 0.08
   # Pinch point inside the wall's outer face (the rolled lip) and below the rim.
@@ -299,6 +299,7 @@ dump_bin:
   hover: 0.15
   empty_s: 2.0
   swing_margin: 0.3
+  pour_clearance: 0.45
   # A reading at or above this closed on nothing (closed on nothing reads ~1.0; the
   # rim's thin wall reads close to it: measure on the robot and tighten).
   held_max: 0.97
