@@ -92,7 +92,10 @@ def test_the_fingers_straddle_a_side_wall_at_the_rim(plan):
         GEOM.floor_z + BIN.height - POUR.below_rim, abs=0.005
     )
     assert approach[2] < -0.999
-    assert abs(closing[1]) > 0.999
+    # The pads move along the pinch frame's x (closing x approach), here across the
+    # side wall (along the robot's y), so they straddle it.
+    pads = np.cross(closing, approach)
+    assert abs(pads[1]) > 0.999
 
 
 def test_the_rolled_bin_is_upside_down_and_empties_to_the_side(plan):

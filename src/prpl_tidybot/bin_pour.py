@@ -120,9 +120,11 @@ def _tool_frame(
 
 
 def _down_rotation() -> NDArray[np.float64]:
-    """The tool pointing down with the fingers closing along the arm's y (across a
-    side wall, one running along the robot's forward axis)."""
-    quat = _down_quat(math.pi / 2)  # (x, y, z, w)
+    """The tool pointing down with the pads moving along the arm's y, across a side
+    wall (one running along the robot's forward axis). The pads move along the
+    pinch frame's x (``top_down_pick.finger_axis``), which ``_down_quat(0)`` lays
+    along the arm's y."""
+    quat = _down_quat(0.0)  # (x, y, z, w)
     mat = np.empty(9)
     mujoco.mju_quat2Mat(mat, np.array([quat[3], quat[0], quat[1], quat[2]]))
     return mat.reshape(3, 3)
@@ -436,6 +438,7 @@ def pour_point(
     ``POUR_ANGLE``), the base at its turned pose."""
     tip = next(s for s in plan.stages if s.name == "tip")
     _, across = _spans(bin_fit, plan.face)
+    q = tip.arm[-1]
     for q in tip.arm:
         bottom, rim = bin_points_in_hand(q, geom, pour, across, plan.side, bin_fit)
         up = (rim - bottom) / np.linalg.norm(rim - bottom)
