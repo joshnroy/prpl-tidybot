@@ -1,17 +1,19 @@
 """Pour the bin out: the real counterpart of the simulator's ``BinPourController``
 (hitl-pmp, ``environments/tossing3d/kinder_backend.py``).
 
-The same stages: park ``standoff`` from the bin facing one of its faces, grasp the
-near wall's rim top-down, lift the bin clear of the floor, turn the base a quarter
-turn so the bin hangs beside where it stood, tip it over, hold it while whatever is
-inside falls out, then reverse every move, set the bin down where it was and let go.
+The same stages: park ``standoff`` from the bin facing one of its faces, grasp a rim
+top-down, lift the bin clear of the floor, turn the base a quarter turn so the bin
+hangs beside where it stood, roll it over about the robot's forward axis so whatever
+is inside falls out to the robot's side, hold, then reverse every move, set the bin
+down where it was and let go.
 
-One deliberate difference: the tip is about the gripped wall's own direction (the
-wall tangent, horizontal), not about the robot's heading. The fingers close across
-the wall, so a rotation about the heading would be about the line through both pads,
-which a pinch grip resists only by friction about the contact normal; about the wall
-tangent the pads' normal forces hold it. The bin tips forward, away from the robot,
-so it never swings back over the base.
+The rim gripped is a SIDE wall's (one running along the robot's forward axis), not
+the near wall's: the fingers close across the wall they hold, so the roll about the
+forward axis is about the wall's own direction, which the pads' normal forces hold. A
+near-wall grasp rolled the same way would turn about the line through both pads,
+which a pinch grip resists only by friction; and tipped about its own wall instead
+(the first version of this module) it emptied toward the robot. The bin rolls
+outward, its opening ending past the gripped wall, away from the base.
 
 Everything here is planning (poses and joint targets); the skill server streams the
 stages. Frames: the map frame for the base, the arm's base frame for the arm (as in
@@ -43,32 +45,35 @@ from prpl_tidybot.top_down_pick import (  # pylint: disable=protected-access
 
 # A joint may change by at most this (rad) between consecutive waypoints.
 _MAX_STEP = 0.5
+# Rolled past this, the bin's opening faces down and its contents fall out.
+POUR_ANGLE = math.radians(100.0)
 
 
 @dataclass(frozen=True)
 class BinPourGeometry:  # pylint: disable=too-many-instance-attributes
     """Distances (m) and angles (rad) of the pour; the defaults follow the simulator's
-    controller (0.48 m lift, a quarter turn) except where the real arm's joint limits
-    differ: at the simulator's 0.76 m standoff the elbow is folded so far that the
-    wrist reaches only ~90 degrees of tip within the Gen3's limits (joint 6 +-119.7,
-    joint 4 +-147.3), the opening still sideways; from 0.84 m it reaches 120."""
+    controller (0.76 m standoff, a quarter turn, a roll about the forward axis) except
+    the height: with the side wall gripped, the Gen3 reaches the lift within its joint
+    limits (joint 6 +-119.7, joint 4 +-147.3) with the pinch point 0.70 m up, not the
+    simulator's ~0.83, so the blue bin is lifted 0.35 m rather than 0.48."""
 
-    standoff: float = 0.84
+    standoff: float = 0.76
     # Other standoffs tried, in order, when the preferred one does not solve.
-    standoff_options: tuple[float, ...] = (0.80, 0.88, 0.92, 0.76)
+    standoff_options: tuple[float, ...] = (0.70, 0.80, 0.84)
     # The pinch point sits this far inside the wall's outer face (the rolled lip and
     # the wall between the pads) and this far below the rim.
     rim_inset: float = 0.012
     below_rim: float = 0.03
     hover: float = 0.15
-    # The pinch point's height above the floor while the bin is up and tipped: what
+    # The pinch point's height above the floor while the bin is up and rolled: what
     # the arm's reach depends on, whatever the bin's height (the blue bin, rim at
-    # 0.384 m, is then lifted 0.48 m as in the simulator).
-    tip_height: float = 0.834
+    # 0.384 m, is then lifted 0.35 m).
+    tip_height: float = 0.70
     # The bin's base must clear the floor by at least this once lifted.
     min_lift: float = 0.2
-    # How far the bin tips over: past 90 degrees the opening faces down.
-    tilt: float = math.radians(120.0)
+    # How far the bin rolls over: past 90 degrees the opening faces down (the
+    # simulator rolls 180; the arm reaches ~175 from 0.76 m).
+    tilt: float = math.radians(160.0)
     # Waypoint spacing for the streamed moves.
     lift_step: float = 0.08
     tilt_step: float = math.radians(10.0)
@@ -77,6 +82,8 @@ class BinPourGeometry:  # pylint: disable=too-many-instance-attributes
     # The bin, lifted, may swing this far outside the drivable box (nothing at its
     # height is assumed there).
     swing_margin: float = 0.3
+    # The contents must land at least this far from the turned base's centre.
+    pour_clearance: float = 0.45
 
 
 @dataclass(frozen=True)
@@ -100,6 +107,8 @@ class BinPourPlan:
     turn: float
     stages: tuple[PourStage, ...] = field(default_factory=tuple)
     standoff: float = 0.0
+    # The side wall gripped: +1 the robot's left (+y), -1 its right.
+    side: int = 1
 
 
 def _tool_frame(
@@ -111,17 +120,26 @@ def _tool_frame(
 
 
 def _down_rotation() -> NDArray[np.float64]:
-    """The tool pointing down with the fingers closing along the arm's +x (across a
-    wall that faces the robot)."""
-    quat = _down_quat(0.0)  # (x, y, z, w)
+    """The tool pointing down with the fingers closing along the arm's y (across a
+    side wall, one running along the robot's forward axis)."""
+    quat = _down_quat(math.pi / 2)  # (x, y, z, w)
     mat = np.empty(9)
     mujoco.mju_quat2Mat(mat, np.array([quat[3], quat[0], quat[1], quat[2]]))
     return mat.reshape(3, 3)
 
 
-def _rot_y(angle: float) -> NDArray[np.float64]:
+def _rot_x(angle: float) -> NDArray[np.float64]:
+    """A rotation about the arm's forward axis."""
     c, s = math.cos(angle), math.sin(angle)
-    return np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]])
+    return np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
+
+
+def _spans(bin_fit: BinFit, face: int) -> tuple[float, float]:
+    """The bin's extent along the robot's forward axis and across it, facing
+    ``face`` (0, 2: along the bin's own x)."""
+    if face % 2 == 0:
+        return bin_fit.length, bin_fit.width
+    return bin_fit.width, bin_fit.length
 
 
 def joint_limits(geom: TopDownPickGeometry) -> tuple[NDArray[np.float64], ...]:
@@ -171,19 +189,21 @@ def tool_joints(
     )
 
 
-def bin_points_in_hand(
+def bin_points_in_hand(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     q: Sequence[float],
     geom: TopDownPickGeometry,
     pour: BinPourGeometry,
-    span: float,
+    across: float,
+    side: int,
     bin_fit: BinFit,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """The held bin's bottom centre and rim centre (arm frame) at joints ``q``, the
-    bin rigid in the hand as it was grasped."""
-    reach = span / 2 - pour.rim_inset
+    bin rigid in the hand as it was grasped by its ``side`` wall (``across`` the bin's
+    extent across the robot)."""
+    inward = -side * (across / 2 - pour.rim_inset)
     down = _down_rotation()
-    rim = down.T @ np.array([reach, 0.0, pour.below_rim])
-    bottom = down.T @ np.array([reach, 0.0, pour.below_rim - bin_fit.height])
+    rim = down.T @ np.array([0.0, inward, pour.below_rim])
+    bottom = down.T @ np.array([0.0, inward, pour.below_rim - bin_fit.height])
     pos, rot = _tool_frame(q, geom)
     return pos + rot @ bottom, pos + rot @ rim
 
@@ -213,15 +233,19 @@ def _swing_clear(
     return True
 
 
-def _arm_stages(
+def _arm_stages(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
     geom: TopDownPickGeometry,
     pour: BinPourGeometry,
     standoff: float,
-    span: float,
+    across: float,
+    side: int,
     bin_fit: BinFit,
 ) -> dict[str, list[list[float]]]:
-    """The arm's waypoints per stage, in the arm frame (the same for any stand)."""
-    x = standoff - span / 2 + pour.rim_inset - geom.mounting_offset
+    """The arm's waypoints per stage, in the arm frame (the same for any stand): the
+    pinch point over the ``side`` wall's middle, the roll outward about the forward
+    axis."""
+    x = standoff - geom.mounting_offset
+    y = side * (across / 2 - pour.rim_inset)
     z_rim = geom.floor_z + bin_fit.height - pour.below_rim
     z_up = geom.floor_z + pour.tip_height
     if z_up - z_rim < pour.min_lift:
@@ -231,16 +255,14 @@ def _arm_stages(
         )
     down = _down_rotation()
     seed: list[float] = list(RETRACT_ARM_CONF)
-    hover = tool_joints((x, 0.0, z_rim + pour.hover), down, geom, seed)
-    rim = [tool_joints((x, 0.0, z_rim), down, geom, hover)]
+    hover = tool_joints((x, y, z_rim + pour.hover), down, geom, seed)
+    rim = [tool_joints((x, y, z_rim), down, geom, hover)]
     lift: list[list[float]] = []
     for z in _steps(z_rim, z_up, pour.lift_step):
-        lift.append(tool_joints((x, 0.0, z), down, geom, (lift or rim)[-1]))
+        lift.append(tool_joints((x, y, z), down, geom, (lift or rim)[-1]))
     tip: list[list[float]] = []
-    for a in _steps(0.0, -pour.tilt, pour.tilt_step):
-        tip.append(
-            tool_joints((x, 0.0, z_up), _rot_y(a) @ down, geom, (tip or lift)[-1])
-        )
+    for a in _steps(0.0, side * pour.tilt, pour.tilt_step):
+        tip.append(tool_joints((x, y, z_up), _rot_x(a) @ down, geom, (tip or lift)[-1]))
     untip = tip[-2::-1] + [lift[-1]]
     lower = lift[-2::-1] + rim
     return {
@@ -276,7 +298,7 @@ def plan_bin_pour(  # pylint: disable=too-many-locals
         floor_bounds[3] + pour.swing_margin,
     )
     reasons: list[str] = []
-    arms: dict[tuple[float, int], dict[str, list[list[float]]] | str] = {}
+    arms: dict[tuple[float, int, int], dict[str, list[list[float]]] | str] = {}
     for standoff in (pour.standoff, *pour.standoff_options):
         plan = _plan_at(
             bin_fit, robot, geom, pour, standoff, grown, radius, arms, is_valid
@@ -295,7 +317,7 @@ def _plan_at(  # pylint: disable=too-many-arguments,too-many-positional-argument
     standoff: float,
     grown: Sequence[float],
     radius: float,
-    arms: dict[tuple[float, int], dict[str, list[list[float]]] | str],
+    arms: dict[tuple[float, int, int], dict[str, list[list[float]]] | str],
     is_valid: Callable[[tuple[float, float, float]], bool] | None = None,
 ) -> BinPourPlan | list[str]:
     """The pour from ``standoff``, or each candidate's reason for failing."""
@@ -315,10 +337,11 @@ def _plan_at(  # pylint: disable=too-many-arguments,too-many-positional-argument
             heading,
         )
         for turn in (math.pi / 2, -math.pi / 2):
-            travel = math.hypot(stand[0] - robot[0], stand[1] - robot[1])
-            candidates.append((travel, face, turn, stand))
+            for side in (1, -1):
+                travel = math.hypot(stand[0] - robot[0], stand[1] - robot[1])
+                candidates.append((travel, face, turn, -side, side, stand))
     reasons = []
-    for _, face, turn, stand in sorted(candidates):
+    for _, face, turn, _, side, stand in sorted(candidates):
         if not (
             floor_bounds[0] <= stand[0] <= floor_bounds[1]
             and floor_bounds[2] <= stand[1] <= floor_bounds[3]
@@ -332,16 +355,26 @@ def _plan_at(  # pylint: disable=too-many-arguments,too-many-positional-argument
         if not _swing_clear((bin_fit.x, bin_fit.y), stand, turn, radius, grown):
             reasons.append(f"face {face}, turn {math.degrees(turn):+.0f}: swing")
             continue
-        span = bin_fit.length if face % 2 == 0 else bin_fit.width
-        key = (standoff, face % 2)
+        _, across = _spans(bin_fit, face)
+        key = (standoff, face % 2, side)
         if key not in arms:
             try:
-                arms[key] = _arm_stages(geom, pour, standoff, span, bin_fit)
+                arms[key] = _arm_stages(geom, pour, standoff, across, side, bin_fit)
             except ValueError as e:
                 arms[key] = str(e)
         arm = arms[key]
         if isinstance(arm, str):
-            reasons.append(f"face {face}: {arm}")
+            reasons.append(f"face {face}, side {side:+d}: {arm}")
+            continue
+        falls = _pour_xy(arm["tip"][-1], turned, geom, pour, across, side, bin_fit)
+        if math.hypot(falls[0] - stand[0], falls[1] - stand[1]) < pour.pour_clearance:
+            reasons.append(f"face {face}, side {side:+d}: pours onto the base")
+            continue
+        if not (
+            floor_bounds[0] <= falls[0] <= floor_bounds[1]
+            and floor_bounds[2] <= falls[1] <= floor_bounds[3]
+        ):
+            reasons.append(f"face {face}, side {side:+d}: pours off the floor box")
             continue
 
         def stage(
@@ -370,8 +403,26 @@ def _plan_at(  # pylint: disable=too-many-arguments,too-many-positional-argument
             stage("open", arm["rim"], 0.0),
             stage("withdraw", arm["withdraw"], 0.0),
         )
-        return BinPourPlan(stand, face, turn, stages, standoff)
+        return BinPourPlan(stand, face, turn, stages, standoff, side)
     return reasons
+
+
+def _pour_xy(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    q: Sequence[float],
+    base: Sequence[float],
+    geom: TopDownPickGeometry,
+    pour: BinPourGeometry,
+    across: float,
+    side: int,
+    bin_fit: BinFit,
+) -> tuple[float, float]:
+    """The map point under the held bin's rim centre at joints ``q``, base at
+    ``base``."""
+    _, rim = bin_points_in_hand(q, geom, pour, across, side, bin_fit)
+    x, y, theta = base
+    ax, ay = rim[0] + geom.mounting_offset, rim[1]
+    c, s = math.cos(theta), math.sin(theta)
+    return (x + c * ax - s * ay, y + s * ax + c * ay)
 
 
 def pour_point(
@@ -380,12 +431,14 @@ def pour_point(
     geom: TopDownPickGeometry,
     pour: BinPourGeometry,
 ) -> tuple[float, float]:
-    """Where the contents fall (map frame): under the tipped bin's rim centre, the
-    base at its turned pose."""
+    """Where the contents fall (map frame): under the rim's centre at the first
+    waypoint of the roll where the bin's opening faces down (rolled past
+    ``POUR_ANGLE``), the base at its turned pose."""
     tip = next(s for s in plan.stages if s.name == "tip")
-    span = bin_fit.length if plan.face % 2 == 0 else bin_fit.width
-    _, rim = bin_points_in_hand(tip.arm[-1], geom, pour, span, bin_fit)
-    x, y, theta = tip.base
-    ax, ay = rim[0] + geom.mounting_offset, rim[1]
-    c, s = math.cos(theta), math.sin(theta)
-    return (x + c * ax - s * ay, y + s * ax + c * ay)
+    _, across = _spans(bin_fit, plan.face)
+    for q in tip.arm:
+        bottom, rim = bin_points_in_hand(q, geom, pour, across, plan.side, bin_fit)
+        up = (rim - bottom) / np.linalg.norm(rim - bottom)
+        if up[2] < math.cos(POUR_ANGLE):
+            break
+    return _pour_xy(q, tip.base, geom, pour, across, plan.side, bin_fit)

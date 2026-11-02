@@ -75,10 +75,30 @@ class TossSim:
     ) -> None:
         sim = cfg.sim
         cube = [float(v) for v in sim.cube]
+        b = cfg.bin
+        sim_bin = sim.get("bin")
         self.world = SimWorld(
             base_pose=[float(v) for v in sim.start_base_pose],
             cube=(cube[0], cube[1], math.radians(cube[2])),
             landing_offset=[float(v) for v in sim.landing_offset],
+            object_half=float(sim.get("object_half", 0.025)),
+            bin_pose=(
+                None
+                if sim_bin is None
+                else (
+                    float(sim_bin[0]),
+                    float(sim_bin[1]),
+                    math.radians(float(sim_bin[2])),
+                )
+            ),
+            bin_model=(
+                float(b.length),
+                float(b.width),
+                float(b.height),
+                float(b.get("base_length") or b.length),
+                float(b.get("base_width") or b.width),
+                float(b.wall),
+            ),
         )
         self.interface = SimInterface(self.world)
         self.real_env = RealTidyBotEnv(self.interface, control_period=0.0)
