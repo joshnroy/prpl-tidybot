@@ -1,0 +1,37 @@
+# @package _global_
+# The 20 oz vitaminwater bottle instead of the 5 cm cube: `+object=bottle`.
+# The ceiling localizer finds its red label (prpl_tidybot.bottle_localizer) and the
+# top-down pick closes across the bottle's axis, not along it: the 85 mm 2F-85 spans
+# the 66 mm bottle but not its 20 cm length. A bottle repeats every 180 degrees.
+# The pick's "closing yaw" is the pinch frame's y, but the pads move along its x
+# (top_down_pick.finger_axis), so laying "closing" ALONG the axis (offset 0) puts the
+# pads across it. 2026-11-02: offset 90 put them along the bottle, onto its top.
+#
+# The cube source's node is cleared first (`_self_` before `bottle_source`), since a
+# merge would keep its cube-only keys.
+defaults:
+  - _self_
+  - bottle_source
+
+env:
+  pipelines:
+    real:
+      perceiver:
+        target_source: null
+
+pick:
+  top_down:
+    # The onboard position controller: the compliant arm's hover was 47 mm off on the
+    # real bottle (2026-11-02 run 52), against ~9.5 mm per side across it.
+    arm_controller: angular
+    symmetry_deg: 180.0
+    wrist_yaw_offset_deg: 0.0
+    # The wrist servo finds the blue foam cube (OpenCV hue 95-130): it does not see
+    # the red bottle, and it does see the blue bin (hue ~127).
+    lateral_servo:
+      enabled: false
+
+# mode=sim draws and rests the bottle lying (its radius off the floor).
+sim:
+  object: bottle
+  object_half: 0.033

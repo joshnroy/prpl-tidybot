@@ -103,11 +103,23 @@ def load_cases(path: Path | str = DEFAULT_FIXTURE) -> list[dict[str, Any]]:
     return cases
 
 
+def measured_bin(path: Path | str = DEFAULT_FIXTURE) -> dict[str, float]:
+    """The bin the fixture's rests were recorded in (the cardboard box), whatever bin
+    ``cfg.bin`` measures today."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    return {k: float(v) for k, v in data["measured_bin"].items()}
+
+
 def compose_config(case: dict[str, Any], controller: Controller) -> DictConfig:
-    """The skill server's config for ``mode=sim`` with the case's scene."""
+    """The skill server's config for ``mode=sim`` with the case's scene, in the bin
+    the case was recorded in (straight walls)."""
     b, c, robot = case["bin"], case["cube"], case["robot"]
+    walls = measured_bin()
     overrides = [
         "mode=sim",
+        *(f"bin.{k}={v}" for k, v in walls.items()),
+        "bin.base_length=null",
+        "bin.base_width=null",
         f"sim.start_base_pose=[{robot[0]},{robot[1]},{robot[2]}]",
         f"sim.cube=[{c['x']},{c['y']},{c['yaw_deg']}]",
         f"sim.bin=[{b['x']},{b['y']},{math.degrees(b['yaw'])}]",

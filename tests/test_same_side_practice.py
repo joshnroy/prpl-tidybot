@@ -208,12 +208,13 @@ def test_the_collision_check_refuses_a_gripper_over_a_wall():
         assert (
             arm_bin_collision(grasp, geom, base, _bin_fit(), in_bin) is not None
         ) == (hits), cube
+    rim = _bin_fit().height
     high = top_down_joint_targets(
         *arm_frame_target(base, (BIN[0] + 0.15, BIN[1]), geom),
         0.0,
-        dataclasses.replace(geom, hover_height=0.30),
+        dataclasses.replace(geom, hover_height=rim + 0.05),
     )[0]
-    assert forward_kinematics(high, geom)[0][2] > geom.floor_z + 0.3
+    assert forward_kinematics(high, geom)[0][2] > geom.floor_z + rim
     assert arm_bin_collision(high, geom, base, _bin_fit(), in_bin) is None
 
 
@@ -414,8 +415,9 @@ def test_a_floor_cube_30_cm_from_the_bin_is_still_pickable():
 
 def test_the_floor_pick_uses_the_other_faces_when_only_they_clear():
     """A floor cube close beside the wall gets the grasp turned a quarter (fingers
-    along the wall): with the real 2F-85 links, 5-8 cm from the wall only the turned
-    grasp clears it (at 9 cm both do)."""
+    along the wall): with the real 2F-85 links and the blue bin's 0.384 m walls, 8 cm
+    from the wall only the turned grasp clears it (5-7 cm neither does, at 9 cm both
+    do; the cardboard box's 0.21 m walls left 5-8 cm to the turned grasp alone)."""
     from prpl_tidybot.robot_skills import (  # pylint: disable=import-outside-toplevel
         _floor_grasp_geometry,
     )
@@ -429,7 +431,7 @@ def test_the_floor_pick_uses_the_other_faces_when_only_they_clear():
     fit = _bin_fit()
     base = (fit.x + 0.67, fit.y, math.pi)
     # Beside the +y end wall (the bin's length is along y), outside it.
-    cube = {"x": fit.x, "y": fit.y + fit.length / 2 + 0.07, "yaw_deg": 0.0}
+    cube = {"x": fit.x, "y": fit.y + fit.length / 2 + 0.08, "yaw_deg": 0.0}
     results = {}
     for turn in (0.0, math.pi / 2):
         g = dataclasses.replace(geom, closing_turn=turn)

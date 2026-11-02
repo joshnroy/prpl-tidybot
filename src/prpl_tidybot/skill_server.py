@@ -42,6 +42,20 @@ MAP frame, metres and radians; hitl converts frames on its side):
     ``direction`` None: the bin's spot's fixed direction (``toss.spot_directions``).
     Raises ``ValueError`` (and moves nothing) outside the real bounds or for a toss
     pose across the barrier, off the drivable box or on the bin.
+``can_dump_bin() -> {"feasible", "refused", "reason", "stand", "face", "turn_deg",
+"pour_point"}``
+    A dry run of the dump; moves nothing.
+``dump_bin() -> {"dumped", "refused", "reason", "note", "bin", "stand", "face",
+"turn_deg", "pour_point", "stages", "gripper"}``
+    Empty the bin (the simulator's PourCubeOutOfBin; :mod:`prpl_tidybot.bin_pour`):
+    grasp its near rim top-down, lift it, turn the base a quarter turn, tip it over
+    so whatever is inside falls out at ``pour_point`` [x, y], then put it back where
+    it was, let go and back off. ``refused``: NOTHING MOVED (no bin, the hand not
+    empty, no standoff on the robot's side of the barrier, no IK within the arm's
+    joint limits), ``reason`` says why. ``dumped`` False and ``refused`` False: the
+    robot moved and stopped short (``note``): closed on nothing at the rim (it let go
+    and withdrew; ``gripper`` the reading), or a move did not arrive. Whether to dump
+    is the caller's choice: the bin need not hold anything.
 ``open_gripper()``, ``retract()``, ``go_home()``, ``stop()``.
 
 Definitions the planner relies on:
@@ -93,7 +107,8 @@ from prpl_tidybot.aimed_toss import (
     aimed_toss_pose,
     plan_aimed_toss,
 )
-from prpl_tidybot.bin_localizer import BinFit, ConstantBinSource, cube_in_bin
+from prpl_tidybot.bin_localizer import BinFit, cube_in_bin
+from prpl_tidybot.bin_pour import BinPourGeometry
 from prpl_tidybot.interfaces.arm_interface import ArmInterface, ArmMotionAborted
 from prpl_tidybot.interfaces.base_interface import RealBaseInterface
 from prpl_tidybot.motion_log import MarkerPoseReader, MotionLog, se2_xyt
@@ -103,6 +118,7 @@ from prpl_tidybot.robot_skills import (
     _CeilingRecorder,
     _cube_source_kwargs,
     _drive_to,
+    _dump_bin,
     _fake_reading,
     _find_cube,
     _grasp_at,
@@ -110,8 +126,12 @@ from prpl_tidybot.robot_skills import (
     _retract,
     _set_gripper,
     _WristRecorder,
+    dump_summary,
+    plan_dump,
     plan_pick,
+    pour_geometry_from_config,
 )
+from prpl_tidybot.sim_robot import SimBinSource
 from prpl_tidybot.top_down_pick import (
     TopDownPickGeometry,
     geometry_from_config,
@@ -132,6 +152,8 @@ EXPOSED = (
     "can_pick",
     "pick",
     "toss",
+    "can_dump_bin",
+    "dump_bin",
     "open_gripper",
     "retract",
     "go_home",
@@ -305,6 +327,7 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
         self.workspace = Workspace.from_config(cfg.get("barrier"), self.floor)
         self.bounds = RealTossBounds.from_config(cfg.real_toss_bounds)
         self.in_bin_margin = float(cfg.bin.in_bin_margin)
+        self.pour = pour_geometry_from_config(cfg.get("dump_bin"))
         server = cfg.get("skill_server")
         self.upright_min_iou = (
             0.75 if server is None else float(server.get("upright_min_iou", 0.75))
@@ -834,6 +857,70 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
             | base
         )
 
+    def _dump_plan(self, bin_fit: BinFit | None) -> tuple[Any, str | None]:
+        return plan_dump(
+            self._robot(),
+            bin_fit,
+            self.geom,
+            self.pour,
+            self.workspace,
+            self.gripper_command >= _CLOSED and self._held_reading(),
+        )
+
+    @_logged
+    def can_dump_bin(self) -> dict[str, Any]:
+        """A dry run of ``dump_bin``: whether it would start, and its plan; moves
+        nothing."""
+        bin_fit = self._bin()
+        plan, why = self._dump_plan(bin_fit)
+        reply: dict[str, Any] = {"feasible": why is None, "refused": why is not None}
+        reply["reason"] = why
+        if plan is not None and bin_fit is not None:
+            reply |= dump_summary(plan, bin_fit, self.geom, self.pour)
+        return reply
+
+    @_logged
+    def dump_bin(self) -> dict[str, Any]:
+        """Empty the bin: grasp its near rim, lift it, turn, tip it over so whatever
+        is inside falls out at ``pour_point``, then put it back where it was and let
+        go (the simulator's PourCubeOutOfBin). See the module docstring."""
+        bin_fit = self._bin()
+        reply: dict[str, Any] = {
+            "dumped": False,
+            "refused": False,
+            "reason": None,
+            "note": None,
+            "bin": None if bin_fit is None else bin_fit.as_dict(),
+            "stages": [],
+            "gripper": None,
+        }
+        plan, why = self._dump_plan(bin_fit)
+        if plan is None or bin_fit is None:
+            return reply | {"refused": True, "reason": why, "note": why}
+        reply |= dump_summary(plan, bin_fit, self.geom, self.pour)
+        with self._moving():
+            record: dict[str, Any] = {"stages": reply["stages"]}
+            failure = _dump_bin(
+                self.cfg,
+                self.real_env,
+                self.arm,
+                self.geom,
+                self._step,
+                plan,
+                bin_fit,
+                record,
+                self._read,
+                self.workspace,
+                self.stop_event,
+            )
+            closed = self.arm.get_gripper_state() >= _CLOSED
+            self.gripper_command = 1.0 if closed else 0.0
+            return reply | {
+                "dumped": failure is None,
+                "note": failure,
+                "gripper": record.get("gripper"),
+            }
+
     @_logged
     def open_gripper(self) -> None:
         """Open the gripper where the arm is."""
@@ -1005,11 +1092,8 @@ def build_skills(
         ceiling, sleep = sim.recorder, sim.world.idle
         bin_source: Any = None
         if cfg.sim.get("bin") is not None:
-            x, y, yaw_deg = (float(v) for v in cfg.sim.bin)
-            b = cfg.bin
-            bin_source = ConstantBinSource(
-                x, y, math.radians(yaw_deg), b.length, b.width, b.height, b.wall
-            )
+            # The sim's own bin: it moves when the dump carries it, or the person.
+            bin_source = SimBinSource(sim.world)
     else:
         pipeline = cfg.env.pipelines[cfg.mode]
         real_env = hydra.utils.instantiate(pipeline.real_env, _convert_="all")
@@ -1211,6 +1295,14 @@ class TossingRobotClient:
             )
         )
 
+    def can_dump_bin(self) -> dict[str, Any]:
+        """See the module docstring."""
+        return dict(self._call("can_dump_bin"))
+
+    def dump_bin(self) -> dict[str, Any]:
+        """See the module docstring."""
+        return dict(self._call("dump_bin"))
+
     def open_gripper(self) -> None:
         """See the module docstring."""
         self._call("open_gripper")
@@ -1243,7 +1335,7 @@ REAL_WORKSPACE = Workspace(
     clearance=0.05,
     cube_half=0.025,
 )
-CLOSE_SPOT_BIN = BinFit(-0.29, -0.77, math.pi / 2, 0.39, 0.29, 0.21, 0.005)
+CLOSE_SPOT_BIN = BinFit(-0.29, -0.77, math.pi / 2, 0.365, 0.26, 0.384, 0.005)
 REAL_GEOMETRY = TopDownPickGeometry(
     reach=0.55,
     floor_z=-0.395,
@@ -1293,6 +1385,8 @@ class FakeTossingRobot:  # pylint: disable=too-many-instance-attributes
         home: Sequence[float] = HOME_POSE,
         max_attempts: int = 2,
         bin_localized: bool = True,
+        pour: BinPourGeometry = BinPourGeometry(),
+        dump_outcomes: Sequence[bool] = (True,),
     ) -> None:
         self.robot = [float(v) for v in robot]
         self.cube = None if cube is None else [float(v) for v in cube]
@@ -1311,6 +1405,9 @@ class FakeTossingRobot:  # pylint: disable=too-many-instance-attributes
         self.home = [float(v) for v in home]
         self.max_attempts = int(max_attempts)
         self.bin_localized = bool(bin_localized)
+        self.pour = pour
+        self._dump_outcomes = list(dump_outcomes) or [True]
+        self._dumps = 0
         self.holding = False
         self.gripper_command = 0.0
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
@@ -1479,6 +1576,58 @@ class FakeTossingRobot:  # pylint: disable=too-many-instance-attributes
             "pose": list(pose),
             "direction": math.atan2(pose[1] - self.bin_fit.y, pose[0] - self.bin_fit.x),
             "bin": self.bin_fit.as_dict(),
+        }
+
+    def _dump_plan(self) -> tuple[Any, str | None]:
+        return plan_dump(
+            self.robot, self.bin_fit, self.geom, self.pour, self.workspace, self.holding
+        )
+
+    def can_dump_bin(self) -> dict[str, Any]:
+        """As the real ``can_dump_bin``."""
+        self.calls.append(("can_dump_bin", ()))
+        plan, why = self._dump_plan()
+        reply: dict[str, Any] = {"feasible": why is None, "refused": why is not None}
+        reply["reason"] = why
+        if plan is not None and self.bin_fit is not None:
+            reply |= dump_summary(plan, self.bin_fit, self.geom, self.pour)
+        return reply
+
+    def dump_bin(self) -> dict[str, Any]:
+        """Refuse as the real dump does, else empty the bin: a cube inside it lands at
+        ``pour_point``; the bin is put back where it was and the robot ends at the
+        standoff. A dump that fails (per ``dump_outcomes``, cycled) leaves everything
+        where it was, the robot at the standoff."""
+        self.calls.append(("dump_bin", ()))
+        plan, why = self._dump_plan()
+        reply: dict[str, Any] = {
+            "dumped": False,
+            "refused": why is not None,
+            "reason": why,
+            "note": why,
+            "bin": None if self.bin_fit is None else self.bin_fit.as_dict(),
+            "stages": [],
+            "gripper": None,
+        }
+        if plan is None or self.bin_fit is None:
+            return reply
+        reply |= dump_summary(plan, self.bin_fit, self.geom, self.pour)
+        self.robot = list(plan.stand)
+        ok = self._dump_outcomes[self._dumps % len(self._dump_outcomes)]
+        self._dumps += 1
+        if not ok:
+            return reply | {
+                "note": "no grip on the bin's rim (gripper read 1.00)",
+                "gripper": 1.0,
+                "stages": [{"stage": n} for n in ("hover", "rim", "close", "withdraw")],
+            }
+        if self.cube is not None and cube_in_bin(self.cube[:2], self.bin_fit, 0.0):
+            x, y = reply["pour_point"]
+            self.cube = [x, y, self.cube[2]]
+        return reply | {
+            "dumped": True,
+            "gripper": 0.9,
+            "stages": [{"stage": s.name} for s in plan.stages],
         }
 
     def open_gripper(self) -> None:

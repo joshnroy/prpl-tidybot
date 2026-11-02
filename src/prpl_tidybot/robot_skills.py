@@ -28,6 +28,12 @@ from omegaconf import DictConfig
 
 from prpl_tidybot.aimed_toss import Workspace
 from prpl_tidybot.bin_localizer import BinFit, cube_in_bin
+from prpl_tidybot.bin_pour import (
+    BinPourGeometry,
+    BinPourPlan,
+    plan_bin_pour,
+    pour_point,
+)
 from prpl_tidybot.gripper_shape import (
     FINGER_LINKS,
     GRIPPER_HOUSING,
@@ -699,17 +705,18 @@ def _cube_source_kwargs(
     cfg: DictConfig, target_cfg: Any, log_dir: Path | None = None
 ) -> dict[str, Any]:
     """The ceiling localizer searches everywhere the arm can grasp from inside the
-    drivable box, not just the box itself (a bin just past its edge), and saves the
-    frames of any missed localization beside the run's logs."""
-    if not str(target_cfg["_target_"]).endswith(
-        ("CeilingCubeTargetSource", "CeilingCubeDetectorSource")
-    ):
+    drivable box, not just the box itself (a bin just past its edge); the cube's also
+    saves the frames of any missed localization beside the run's logs (the bottle's
+    keeps none)."""
+    target = str(target_cfg["_target_"])
+    is_cube = target.endswith(("CeilingCubeTargetSource", "CeilingCubeDetectorSource"))
+    if not is_cube and not target.endswith("CeilingBottleSource"):
         return {}
     bounds = grasp_search_bounds(
         tuple(cfg.preview.floor_bounds), geometry_from_config(cfg.pick.get("top_down"))
     )
     kwargs: dict[str, Any] = {"floor_bounds": list(bounds)}
-    if log_dir is not None:
+    if is_cube and log_dir is not None:
         kwargs["failure_dir"] = str(Path(log_dir) / "localization_failures")
     return kwargs
 
@@ -1044,6 +1051,168 @@ def _place_top_down(  # pylint: disable=too-many-arguments,too-many-positional-a
     return None
 
 
+def pour_geometry_from_config(cfg: Any) -> BinPourGeometry:
+    """Build the dump's geometry from a ``dump_bin`` config block (defaults fill
+    gaps; ``*_deg`` keys in degrees)."""
+    kwargs: dict[str, Any] = {}
+    for f in dataclasses.fields(BinPourGeometry):
+        if cfg is not None and f.name == "standoff_options" and f.name in cfg:
+            kwargs[f.name] = tuple(float(v) for v in cfg[f.name])
+        elif cfg is not None and f.name in cfg:
+            kwargs[f.name] = float(cfg[f.name])
+        elif cfg is not None and f"{f.name}_deg" in cfg:
+            kwargs[f.name] = math.radians(float(cfg[f"{f.name}_deg"]))
+    return BinPourGeometry(**kwargs)
+
+
+def plan_dump(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    robot: Sequence[float],
+    bin_fit: BinFit | None,
+    geom: TopDownPickGeometry,
+    pour: BinPourGeometry,
+    workspace: Workspace,
+    holding: bool,
+) -> tuple[BinPourPlan | None, str | None]:
+    """The bin dump the robot would make from ``robot``, or None and why it may not
+    start (nothing moves either way): no bin, the hand not empty, no standoff the
+    workspace accepts (across the barrier, off the drivable box) or no IK within the
+    arm's limits. Shared by the real skill, its dry run and the fake robot."""
+    if bin_fit is None:
+        return None, "no bin found"
+    if holding:
+        return None, "holding the cube: the hand must be empty to grasp the bin"
+    try:
+        plan = plan_bin_pour(
+            bin_fit,
+            robot,
+            geom,
+            pour,
+            tuple(workspace.floor_bounds),
+            workspace.valid(bin_fit),
+        )
+    except ValueError as e:
+        return None, str(e)
+    return plan, None
+
+
+def dump_summary(
+    plan: BinPourPlan,
+    bin_fit: BinFit,
+    geom: TopDownPickGeometry,
+    pour: BinPourGeometry,
+) -> dict[str, Any]:
+    """The plan's fields in a skill reply: plain floats and lists."""
+    return {
+        "stand": [float(v) for v in plan.stand],
+        "face": int(plan.face),
+        "turn_deg": math.degrees(plan.turn),
+        "pour_point": [float(v) for v in pour_point(plan, bin_fit, geom, pour)],
+    }
+
+
+def _dump_bin(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    cfg: DictConfig,
+    real_env: Any,
+    arm: ArmInterface,
+    geom: TopDownPickGeometry,
+    step: Callable[[str], None],
+    plan: BinPourPlan,
+    bin_fit: BinFit,
+    record: dict[str, Any],
+    read: Callable[[float], float] = float,
+    workspace: Workspace | None = None,
+    stop: threading.Event | None = None,
+) -> str | None:
+    """Run a planned bin dump (:func:`plan_dump`): grasp the near rim, lift, turn,
+    tip the bin over to empty it, and put it back where it was. Returns why it stopped
+    short, or None once the bin is back down and released; ``record["stages"]`` lists
+    what ran and ``record["gripper"]`` the reading on the rim.
+
+    The grasp is checked after closing: a reading at or above ``dump_bin.held_max``
+    closed on nothing, so the gripper opens and withdraws before anything is lifted.
+    The base turns with the bin in hand without the workspace check: the plan already
+    vetted the turned pose, and the bin, lifted, clears the floor's obstacles."""
+    stages: list[dict[str, Any]] = record.setdefault("stages", [])
+    step(
+        f"Drive to the dump standoff ({plan.stand[0]:+.3f}, {plan.stand[1]:+.3f}, "
+        f"{math.degrees(plan.stand[2]):+.0f} deg)"
+    )
+    _drive_to(real_env, list(plan.stand), workspace, stop, bin_fit)
+    td = cfg.pick.top_down
+    moves: list[dict[str, Any]] = record.setdefault("moves", [])
+    mover: _Mover = (
+        _AngularMover(arm, td, geom, moves)
+        if td.get("arm_controller", "compliant") == "angular"
+        else _CompliantMover(arm, td, geom, moves, cfg.arm_home)
+    )
+    mover.stop = stop
+    mover.begin()
+    try:
+        try:
+            failure = _run_dump_stages(
+                cfg, real_env, mover, step, plan, record, read, stop
+            )
+        except (ValueError, RuntimeError) as e:
+            # An arm or base error mid-dump is a stop-short reply, not a raise. Until
+            # the bin is up it can be let go where it stands; once lifted it stays
+            # held (opening would drop it), for the person.
+            lifted = any(s["stage"] == "turn" for s in stages)
+            if lifted:
+                return f"dump: {e} (the bin is still held)"
+            mover.gripper(0.0)
+            stages.append({"stage": "withdraw"})
+            mover.move("dump_withdraw", list(plan.stages[0].arm[-1]))
+            return f"dump: {e}"
+        return failure
+    finally:
+        mover.end()
+
+
+def _run_dump_stages(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    cfg: DictConfig,
+    real_env: Any,
+    mover: "_Mover",
+    step: Callable[[str], None],
+    plan: BinPourPlan,
+    record: dict[str, Any],
+    read: Callable[[float], float],
+    stop: threading.Event | None,
+) -> str | None:
+    """The dump's stages (see :func:`_dump_bin`); returns why it stopped short."""
+    held_max = float((cfg.get("dump_bin") or {}).get("held_max", 0.97))
+    stages: list[dict[str, Any]] = record["stages"]
+    planned = plan.stand
+    for stage in plan.stages:
+        step(f"dump: {stage.name}")
+        entry: dict[str, Any] = {"stage": stage.name}
+        stages.append(entry)
+        if any(abs(a - b) > 1e-6 for a, b in zip(stage.base, planned)):
+            # Each drive tick streams a hold to the arm, which only the torque
+            # loop reads: hand the arm back to it for the turn (under the onboard
+            # controller the queue fills and the arm server blocks for good).
+            mover.end()
+            _drive_to(real_env, list(stage.base), None, stop, None)
+            mover.begin()
+            planned = stage.base
+        if stage.name in ("close", "open"):
+            reading = read(mover.gripper(stage.gripper))
+            entry["gripper"] = reading
+            if stage.name == "close":
+                record["gripper"] = reading
+                if reading >= held_max:
+                    mover.gripper(0.0)
+                    stages.append({"stage": "withdraw"})
+                    mover.move("dump_withdraw", list(plan.stages[0].arm[-1]))
+                    return f"no grip on the bin's rim (gripper read {reading:.2f})"
+            continue
+        if not mover.move_path(f"dump_{stage.name}", [list(q) for q in stage.arm]):
+            held = " (the bin is still held)" if stage.gripper > 0.5 else ""
+            return f"dump: {stage.name} did not arrive{held}"
+        if stage.hold_s:
+            time.sleep(stage.hold_s)
+    return None
+
+
 # An onboard-controller move that ends further than this from its goal has hit
 # something (the floor, the cube) or faulted; the toss uses the same check.
 _ANGULAR_ARRIVAL_DEG = 1.0
@@ -1095,6 +1264,14 @@ class _Mover:
         it.
         """
         raise NotImplementedError
+
+    def move_path(self, name: str, path: list[list[float]]) -> bool:
+        """Move through the waypoints; return whether it arrived at the last. By
+        default one move per waypoint (the compliant loop streams each)."""
+        for k, goal in enumerate(path):
+            if not self.move(f"{name}_{k}", list(goal)):
+                return False
+        return True
 
     def gripper(self, position: float) -> float:
         """Move the gripper; return where it stopped."""
@@ -1163,6 +1340,21 @@ class _AngularMover(_Mover):
             raise
         self._joints = list(measured)
         return bool(self._record(name, goal, list(measured))["reached"])
+
+    def move_path(self, name: str, path: list[list[float]]) -> bool:
+        """One continuous onboard trajectory through the waypoints, not a stop at
+        each (the dump's 16-waypoint roll was 16 stop-and-go moves)."""
+        if len(path) == 1:
+            return self.move(name, list(path[0]))
+        self.arm.note_step(name)
+        try:
+            self.check_stop()
+            measured = self.arm.move_trajectory([list(q) for q in path])
+        except ArmMotionAborted:
+            self._aborted = True
+            raise
+        self._joints = list(measured)
+        return bool(self._record(name, list(path[-1]), list(measured))["reached"])
 
     def gripper(self, position: float) -> float:
         self.arm.note_step(f"gripper to {position:.2f}")
