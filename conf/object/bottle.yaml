@@ -21,3 +21,8 @@ pick:
   top_down:
     symmetry_deg: 180.0
     wrist_yaw_offset_deg: 90.0
+
+# mode=sim draws and rests the bottle lying (its radius off the floor).
+sim:
+  object: bottle
+  object_half: 0.033
