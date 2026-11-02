@@ -729,6 +729,8 @@ def test_object_bottle_swaps_the_source_and_grasps_across_the_axis():
     assert (
         not cfg.pick.top_down.lateral_servo.enabled
     )  # the cube servo sees the blue bin
+    # The compliant arm's hover missed the real bottle by 47 mm (2026-11-02 run 52).
+    assert cfg.pick.top_down.arm_controller == "angular"
     kwargs = _cube_source_kwargs(cfg, source)
     assert (
         kwargs["floor_bounds"]

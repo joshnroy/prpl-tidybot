@@ -21,6 +21,9 @@ env:
 
 pick:
   top_down:
+    # The onboard position controller: the compliant arm's hover was 47 mm off on the
+    # real bottle (2026-11-02 run 52), against ~9.5 mm per side across it.
+    arm_controller: angular
     symmetry_deg: 180.0
     wrist_yaw_offset_deg: 0.0
     # The wrist servo finds the blue foam cube (OpenCV hue 95-130): it does not see
