@@ -217,7 +217,7 @@ def test_the_finger_axis_is_the_direction_the_pads_move():
     span = left - right
     assert abs(span[0]) > 0.05 and abs(span[1]) < 1e-6
     q = top_down_joint_targets(0.55, 0.0, 0.3, GEOM)[1]
-    pos, approach, _ = forward_kinematics(q, GEOM)
+    _, approach, _ = forward_kinematics(q, GEOM)
     assert abs(float(np.dot(finger_axis(q, GEOM), approach))) < 1e-9
 
 
