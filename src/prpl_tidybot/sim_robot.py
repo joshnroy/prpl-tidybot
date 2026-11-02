@@ -37,6 +37,8 @@ from ruckig import (  # type: ignore[import-not-found]  # pylint: disable=no-nam
 )
 from spatialmath import SE2
 
+from prpl_tidybot.bin_localizer import BinFit
+from prpl_tidybot.bin_pour import POUR_ANGLE
 from prpl_tidybot.interfaces.arm_interface import ArmInterface
 from prpl_tidybot.interfaces.base_interface import BaseInterface, unwrap_heading
 from prpl_tidybot.interfaces.camera_interface import FakeCameraInterface
@@ -81,6 +83,10 @@ _MIN_PAD_OVERLAP = 0.01
 _GRIPPER_RATE = 1.0 / 0.6
 # Closed on the 5 cm cube the gripper read 0.49 (conf/toss_cycles.yaml).
 GRASP_READING = 0.49
+# Where the fingers stop on the bin's thin rim (closed on nothing reads 1.0).
+RIM_READING = 0.9
+# The held bin empties once rolled past bin_pour.POUR_ANGLE.
+_POUR_COS = math.cos(POUR_ANGLE)
 _ARM_MOUNT_Z = 0.3948
 _FLIGHT_S = 0.8
 
@@ -99,6 +105,10 @@ class SimWorld:
         cube: Sequence[float],
         landing_offset: Sequence[float] = (1.2, 0.0),
         record_period: float = 0.005,
+        object_half: float = _CUBE_HALF,
+        object_kind: str = "cube",
+        bin_pose: Sequence[float] | None = None,
+        bin_model: Sequence[float] | None = None,
     ) -> None:
         self.t = 0.0
         self.base = np.array(base_pose, dtype=float)
@@ -121,7 +131,24 @@ class SimWorld:
         self.angular_stop_short_deg = 0.0
         self.last_angular_path_deg: NDArray[np.float64] | None = None
         self._geom = TopDownPickGeometry()
-        self._cube = np.array([cube[0], cube[1], _CUBE_HALF, cube[2]], dtype=float)
+        # The object's half height resting on the floor (the cube's half side, the
+        # lying bottle's radius).
+        self._half = float(object_half)
+        # "bottle": held only when the pads close across its axis (the cube, the same
+        # every 90 degrees, by its position alone).
+        self.object_kind = object_kind
+        self._cube = np.array([cube[0], cube[1], self._half, cube[2]], dtype=float)
+        # The bin: (rim length, rim width, height, base length, base width, wall), its
+        # map transform (4x4; z = 0 at its base) and, while held, its transform in the
+        # pinch frame. A cube in it when it is grasped rides at `_cube_in_bin` (bin
+        # frame) until the bin is rolled over.
+        self.bin_model = None if bin_model is None else tuple(map(float, bin_model))
+        self._bin: NDArray[np.float64] | None = None
+        self.bin_held = False
+        self._bin_in_hand: NDArray[np.float64] | None = None
+        self._cube_in_bin: NDArray[np.float64] | None = None
+        if bin_pose is not None and bin_model is not None:
+            self.place_bin(*bin_pose)
         self._flight: tuple[float, NDArray[np.float64], NDArray[np.float64]] | None = (
             None
         )
@@ -189,7 +216,31 @@ class SimWorld:
         """Put the cube down on the floor at (x, y)."""
         self.held = False
         self._flight = None
-        self._cube = np.array([x, y, _CUBE_HALF, yaw], dtype=float)
+        self._cube_in_bin = None
+        self._cube = np.array([x, y, self._half, yaw], dtype=float)
+
+    def place_bin(self, x: float, y: float, yaw: float = 0.0) -> None:
+        """Stand the bin upright on the floor at (x, y), its length along ``yaw`` (the
+        person carrying it)."""
+        self.bin_held = False
+        self._bin_in_hand = None
+        self._bin = _transform(x, y, 0.0, _rot_z(yaw))
+
+    def bin_transform(self) -> NDArray[np.float64]:
+        """The bin's map transform now (z = 0 at its base): in the hand or on the
+        floor."""
+        assert self._bin is not None
+        if self.bin_held and self._bin_in_hand is not None:
+            return self.pinch_frame() @ self._bin_in_hand
+        return self._bin.copy()
+
+    def pinch_frame(self) -> NDArray[np.float64]:
+        """The gripper's pinch frame in the map frame (columns: x, the pads' direction;
+        y, ``forward_kinematics``' "closing"; z, the approach)."""
+        _, approach, closing = forward_kinematics(list(self.q), self._geom)
+        arm = np.column_stack([np.cross(closing, approach), closing, approach])
+        x, y, z = (float(v) for v in self.pinch_world())
+        return _transform(x, y, z, _rot_z(float(self.base[2])) @ arm)
 
     def throw_cube(self) -> None:
         """The gripper opened mid-swing: the cube leaves the pinch point and lands
@@ -203,11 +254,11 @@ class SimWorld:
             [
                 x + fwd * math.cos(theta) - left * math.sin(theta),
                 y + fwd * math.sin(theta) + left * math.cos(theta),
-                _CUBE_HALF,
+                self._half,
             ]
         )
         self._flight = (self.t, self.pinch_world(), land)
-        self._cube = np.array([land[0], land[1], _CUBE_HALF, theta])
+        self._cube = np.array([land[0], land[1], self._half, theta])
 
     # Clock.
 
@@ -243,6 +294,7 @@ class SimWorld:
                 self._base_target,
             )
         self._step_gripper()
+        self._pour_if_upside_down()
         if self._flight is not None and self.t - self._flight[0] >= _FLIGHT_S:
             self._flight = None
         self._record()
@@ -253,14 +305,81 @@ class SimWorld:
             self.gripper = min(self.gripper_target, self.gripper + step)
             if self.held:
                 self.gripper = min(self.gripper, GRASP_READING)
+            elif self.bin_held:
+                self.gripper = min(self.gripper, RIM_READING)
             elif self.gripper >= GRASP_READING and self._cube_between_fingers():
                 self.gripper = GRASP_READING
                 self.held = True
+            elif self.gripper >= RIM_READING and self._rim_between_fingers():
+                self.gripper = RIM_READING
+                self._grasp_bin()
         elif self.gripper_target < self.gripper:
             self.gripper = max(self.gripper_target, self.gripper - step)
             if self.held and self.gripper < GRASP_READING - 0.05:
                 pinch = self.pinch_world()
                 self.place_cube(pinch[0], pinch[1], self._cube[3])
+            if self.bin_held and self.gripper < RIM_READING - 0.05:
+                self._release_bin()
+
+    def _grasp_bin(self) -> None:
+        """The fingers closed on the rim: the bin (and a cube resting in it) now ride
+        with the pinch frame."""
+        assert self._bin is not None
+        self.bin_held = True
+        self._bin_in_hand = np.linalg.inv(self.pinch_frame()) @ self._bin
+        if not self.held and self._flight is None and self._inside_bin(self._cube):
+            local = np.linalg.inv(self._bin) @ np.array([*self._cube[:3], 1.0])
+            self._cube_in_bin = local[:3]
+
+    def _release_bin(self) -> None:
+        """The fingers opened: the bin stands upright where it is, under the hand."""
+        t = self.bin_transform()
+        yaw = math.atan2(t[1, 0], t[0, 0])
+        self.place_bin(float(t[0, 3]), float(t[1, 3]), yaw)
+        if self._cube_in_bin is not None:
+            pos = self.bin_transform() @ np.array([*self._cube_in_bin, 1.0])
+            self._cube = np.array([pos[0], pos[1], self._half, self._cube[3]])
+
+    def _pour_if_upside_down(self) -> None:
+        """A cube riding in the held bin falls out once the bin is rolled over: from
+        the rim's centre to the floor below it."""
+        if not self.bin_held or self._cube_in_bin is None or self.bin_model is None:
+            return
+        t = self.bin_transform()
+        if t[2, 2] > _POUR_COS:
+            return
+        rim = t @ np.array([0.0, 0.0, self.bin_model[2], 1.0])
+        start = (t @ np.array([*self._cube_in_bin, 1.0]))[:3]
+        self._cube_in_bin = None
+        land = np.array([rim[0], rim[1], self._half])
+        self._flight = (self.t, start, land)
+        self._cube = np.array([land[0], land[1], self._half, self._cube[3]])
+
+    def _inside_bin(self, cube: NDArray[np.float64]) -> bool:
+        """Whether a resting cube is inside the standing bin's rim footprint."""
+        if self._bin is None or self.bin_model is None:
+            return False
+        local = np.linalg.inv(self._bin) @ np.array([*cube[:3], 1.0])
+        length, width = self.bin_model[0], self.bin_model[1]
+        return bool(abs(local[0]) < length / 2 and abs(local[1]) < width / 2)
+
+    def _rim_between_fingers(self) -> bool:
+        """Whether the pinch point is on the standing bin's rim: within the pads' drop
+        below its top and within 2.5 cm of a wall's line, inside its length."""
+        if self._bin is None or self.bin_model is None or self.bin_held:
+            return False
+        length, width, height = self.bin_model[:3]
+        local = np.linalg.inv(self._bin) @ np.array([*self.pinch_world(), 1.0])
+        lx, ly, lz = local[:3]
+        if not height - self._geom.pad_drop - 0.03 <= lz <= height + 0.01:
+            return False
+        pads = np.linalg.inv(self._bin)[:3, :3] @ self.pads_world()
+        # The pads must straddle the wall: move across it, not along it.
+        on_side = abs(abs(ly) - width / 2) < 0.025 and abs(lx) < length / 2
+        on_side = on_side and abs(pads[1]) > 0.87
+        on_end = abs(abs(lx) - length / 2) < 0.025 and abs(ly) < width / 2
+        on_end = on_end and abs(pads[0]) > 0.87
+        return bool(on_side or on_end)
 
     def _record(self, force: bool = False) -> None:
         if not force and self.t - self._last_record < self._record_period:
@@ -276,6 +395,7 @@ class SimWorld:
                 cube,
                 self.label,
                 self.sublabel,
+                None if self._bin is None else self.bin_transform(),
             )
         )
 
@@ -295,7 +415,11 @@ class SimWorld:
         )
 
     def cube_position(self) -> NDArray[np.float64]:
-        """The cube's (x, y, z, yaw) now: in the gripper, in flight or at rest."""
+        """The cube's (x, y, z, yaw) now: in the gripper, in the held bin, in flight
+        or at rest."""
+        if self._cube_in_bin is not None and self.bin_held:
+            pos = self.bin_transform() @ np.array([*self._cube_in_bin, 1.0])
+            return np.array([*pos[:3], self._cube[3]])
         if self.held:
             pinch = self.pinch_world()
             return np.array([*pinch, self._cube[3]])
@@ -310,20 +434,45 @@ class SimWorld:
     def cube_at_rest(self) -> NDArray[np.float64]:
         """Where the cube is, or will be once a throw lands: what the ceiling cameras
         report after the settle wait."""
-        return self._cube.copy() if not self.held else self.cube_position()
+        if self.held or (self._cube_in_bin is not None and self.bin_held):
+            return self.cube_position()
+        return self._cube.copy()
 
     def _cube_between_fingers(self) -> bool:
         pinch = self.pinch_world()
         cube = self.cube_position()
         # The pads span pad_drop below the pinch point, so a pinch point just above
         # the cube's top still closes on its upper part.
-        overlap = min(pinch[2], cube[2] + _CUBE_HALF) - max(
-            pinch[2] - self._geom.pad_drop, cube[2] - _CUBE_HALF
+        overlap = min(pinch[2], cube[2] + self._half) - max(
+            pinch[2] - self._geom.pad_drop, cube[2] - self._half
         )
-        return bool(
+        if not (
             math.hypot(pinch[0] - cube[0], pinch[1] - cube[1]) < 0.02
             and overlap >= _MIN_PAD_OVERLAP
-        )
+        ):
+            return False
+        if self.object_kind == "bottle":
+            axis = np.array([math.cos(cube[3]), math.sin(cube[3]), 0.0])
+            return bool(abs(float(self.pads_world() @ axis)) < 0.5)
+        return True
+
+    def pads_world(self) -> NDArray[np.float64]:
+        """The direction the pads move along, map frame: the pinch frame's x."""
+        return self.pinch_frame()[:3, 0]
+
+
+def _rot_z(yaw: float) -> NDArray[np.float64]:
+    c, s = math.cos(yaw), math.sin(yaw)
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+
+def _transform(
+    x: float, y: float, z: float, rot: NDArray[np.float64]
+) -> NDArray[np.float64]:
+    t = np.eye(4)
+    t[:3, :3] = rot
+    t[:3, 3] = (x, y, z)
+    return t
 
 
 def _otg_step(
@@ -424,6 +573,18 @@ class SimKortexArm:
             )
         self.world.last_angular_path_deg = path
         self.world.play_arm_path(np.radians(path))
+
+    def move_angular_waypoints(
+        self,
+        path_deg: Sequence[Sequence[float]],
+        durations: Sequence[float],
+        timeout: float | None = None,
+    ) -> None:
+        """The onboard waypoint trajectory, as consecutive joint moves (the sim plays
+        the same path; the real arm blends through the waypoints)."""
+        del durations, timeout
+        for angles in path_deg:
+            self.move_angular(angles)
 
     def get_measured_joint_angles(self) -> list[float]:
         """Joint angles in [0, 360) degrees, as Kortex reports them."""
@@ -527,6 +688,12 @@ class SimArmInterface(ArmInterface):
     def move_angular(self, goal: list[float]) -> list[float]:
         return [float(v) for v in self.server.move_joints_angular(list(goal))]
 
+    def move_trajectory(self, path: list[list[float]]) -> list[float]:
+        return [
+            float(v)
+            for v in self.server.move_joints_trajectory([list(q) for q in path])
+        ]
+
     def set_gripper_angular(self, position: float, timeout: float = 4.0) -> float:
         return float(self.server.gripper_angular(position, timeout))
 
@@ -614,6 +781,40 @@ class SimCubeTargetSource(TargetSource):
     def alternates(self) -> list[tuple[float, float, float]]:
         """One estimate only: there is one (perfect) camera."""
         return []
+
+
+class SimBinSource(TargetSource):
+    """The ceiling bin localizer's view of the sim bin: where it stands now."""
+
+    def __init__(self, world: SimWorld) -> None:
+        self.world = world
+        self.last_fit: BinFit | None = None
+
+    def localize(self) -> BinFit:
+        """The bin as a fit (raises while it is held: no camera sees it standing)."""
+        if self.world.bin_model is None or self.world.bin_held:
+            raise RuntimeError("SimBinSource: no bin standing")
+        t = self.world.bin_transform()
+        length, width, height, base_length, base_width, wall = self.world.bin_model
+        self.last_fit = BinFit(
+            float(t[0, 3]),
+            float(t[1, 3]),
+            (math.atan2(t[1, 0], t[0, 0]) + math.pi / 2) % math.pi - math.pi / 2,
+            length,
+            width,
+            height,
+            wall,
+            base_length=base_length,
+            base_width=base_width,
+        )
+        return self.last_fit
+
+    def get_target(self) -> tuple[float, float, float]:
+        fit = self.localize()
+        return (fit.x, fit.y, fit.height)
+
+    def close(self) -> None:
+        """Nothing to release."""
 
 
 class SimOperator:

@@ -14,10 +14,11 @@ from spatialmath import SE2
 
 from prpl_tidybot.aimed_toss import Barrier, Workspace, footprint
 from prpl_tidybot.bin_localizer import BinFit, ConstantBinSource
+from prpl_tidybot.bin_pour import BinPourGeometry
 from prpl_tidybot.interfaces.arm_interface import FakeArmInterface
 from prpl_tidybot.interfaces.base_interface import FakeBaseInterface
 from prpl_tidybot.real_sim.perceivers.target_source import ConstantTargetSource
-from prpl_tidybot.robot_skills import InBinPick
+from prpl_tidybot.robot_skills import InBinPick, pour_geometry_from_config
 from prpl_tidybot.skill_server import (
     FakeTossingRobot,
     SkillBusy,
@@ -117,8 +118,8 @@ def test_the_server_config_is_the_real_room():
             0.0, abs=0.002
         )
     assert workspace.barrier.depth((0.0, 0.0)) > 0  # the robot is on -y
-    assert (cfg.bin.length, cfg.bin.width, cfg.bin.height) == (0.39, 0.29, 0.21)
-    assert cfg.bin.min_saturation == 130.0
+    assert (cfg.bin.length, cfg.bin.width, cfg.bin.height) == (0.365, 0.26, 0.384)
+    assert list(cfg.bin.hue_range) == [100, 145] and cfg.bin.min_saturation == 50.0
     x0, x1, y0, y1 = cfg.bin.search_bounds
     for spot in (CLOSE_BIN, FAR_BIN):
         assert x0 < spot[0] < x1 and y0 < spot[1] < y1, spot
@@ -650,3 +651,228 @@ def test_busy_and_stopped_cross_the_rpc_as_builtin_errors(skills):
         client.retract()
     assert type(halted.value).__module__ == "builtins"
     assert str(halted.value) == "SkillStopped: stop() was called"
+
+
+# ------------------------------------------------------------------ dump the bin
+
+# A bin on the robot's side of the barrier, where the dump can reach it.
+NEAR_BIN = (0.4, -0.7)
+
+
+def _bin_near(skills):
+    """Put the fake blue recycling bin (rim 0.365 x 0.26, 0.384 tall) on the robot's
+    side of the barrier."""
+    skills.bin_source = ConstantBinSource(
+        NEAR_BIN[0], NEAR_BIN[1], 0.0, 0.365, 0.26, 0.384, 0.005
+    )
+
+
+def test_dump_bin_runs_every_stage_and_puts_the_bin_back(skills):
+    """Grasp the rim, lift, turn, tip, empty, then back down and let go: the robot
+    ends at its standoff with the gripper open."""
+    _bin_near(skills)
+    reply = skills.dump_bin()
+    assert reply["dumped"], reply
+    assert [s["stage"] for s in reply["stages"]] == [
+        "hover",
+        "rim",
+        "close",
+        "lift",
+        "turn",
+        "tip",
+        "empty",
+        "untip",
+        "unturn",
+        "lower",
+        "open",
+        "withdraw",
+    ]
+    robot = skills.observe()["robot"]
+    assert robot[:2] == pytest.approx(reply["stand"][:2], abs=0.02)
+    turn = (robot[2] - reply["stand"][2] + math.pi) % (2 * math.pi) - math.pi
+    assert abs(turn) < 0.02
+    assert skills.gripper_command == 0.0
+
+
+def test_dump_bin_refuses_a_bin_across_the_barrier(skills):
+    """No standoff in the drivable box: nothing moves and the reply says why."""
+    _at_far_spot(skills)
+    before = _still(skills)
+    reply = skills.dump_bin()
+    assert not reply["dumped"]
+    assert "No bin pour" in reply["note"]
+    assert _still(skills) == before
+
+
+def test_dump_bin_without_a_bin_refuses(skills):
+    """No bin found: nothing moves."""
+    skills.bin_source = None
+    before = _still(skills)
+    reply = skills.dump_bin()
+    assert not reply["dumped"] and "no bin" in reply["note"]
+    assert _still(skills) == before
+
+
+def test_a_missed_rim_grasp_lets_go_and_withdraws(skills):
+    """Closed on nothing (the reading at the fully closed end): open, back off and
+    report it, never lifting."""
+    _bin_near(skills)
+    skills._read = lambda r: 1.0  # pylint: disable=protected-access
+    reply = skills.dump_bin()
+    assert not reply["dumped"]
+    assert "rim" in reply["note"]
+    assert [s["stage"] for s in reply["stages"]][-1] == "withdraw"
+    assert "lift" not in [s["stage"] for s in reply["stages"]]
+    assert skills.gripper_command == 0.0
+
+
+def test_dump_refusals_say_refused(skills):
+    """A refusal is flagged ``refused`` with its reason, and nothing moved."""
+    _at_far_spot(skills)
+    reply = skills.dump_bin()
+    assert reply["refused"] and reply["reason"] == reply["note"]
+    assert not skills.can_dump_bin()["feasible"]
+
+
+def test_can_dump_bin_plans_without_moving(skills):
+    """The dry run gives the stand, the face, the turn and where the contents fall,
+    and moves nothing."""
+    _bin_near(skills)
+    before = _still(skills)
+    dry = skills.can_dump_bin()
+    assert dry["feasible"] and not dry["refused"] and dry["reason"] is None
+    assert len(dry["stand"]) == 3 and len(dry["pour_point"]) == 2
+    assert abs(abs(dry["turn_deg"]) - 90.0) < 1e-6
+    assert _still(skills) == before
+    json.dumps(dry)
+
+
+def test_dump_bin_refuses_while_holding_the_cube(skills):
+    """The bin is grasped with an empty hand: holding the cube, nothing moves."""
+    _bin_near(skills)
+    assert skills.pick()["held"]
+    before = _still(skills)
+    reply = skills.dump_bin()
+    assert reply["refused"] and "holding" in reply["reason"]
+    assert _still(skills) == before
+
+
+def test_the_dump_config_is_the_code_default():
+    """conf/toss_cycles.yaml's dump_bin block and BinPourGeometry agree, so a change
+    to one is a change to both."""
+    assert pour_geometry_from_config(_cfg().dump_bin) == BinPourGeometry()
+
+
+def test_dump_bin_is_served_over_the_rpc(skills):
+    """can_dump_bin and dump_bin are part of the contract: the client reaches them and
+    the replies come back plain."""
+    _bin_near(skills)
+    port = 50097
+    thread = threading.Thread(
+        target=serve, args=(skills, "127.0.0.1", port, b"test"), daemon=True
+    )
+    thread.start()
+    client = None
+    for _ in range(50):
+        try:
+            client = TossingRobotClient("127.0.0.1", port, b"test")
+            break
+        except ConnectionRefusedError:
+            threading.Event().wait(0.1)
+    assert client is not None
+    assert client.can_dump_bin()["feasible"]
+    reply = client.dump_bin()
+    assert reply["dumped"], reply
+    json.dumps(reply)
+
+
+# A blue bin on the robot's side, with the fake robot's cube inside it.
+_NEAR_FIT = BinFit(0.4, -0.7, 0.0, 0.365, 0.26, 0.384, 0.005)
+
+
+def test_the_fake_robot_dumps_a_cube_out_of_the_bin():
+    """The fake's dump drops a cube that was inside the bin at the pour point and
+    leaves the robot at the standoff, as the real one would."""
+    robot = FakeTossingRobot(bin_fit=_NEAR_FIT, cube=(0.4, -0.7, 0.0))
+    assert robot.observe()["cube_inside_bin"]
+    reply = robot.dump_bin()
+    assert reply["dumped"] and not reply["refused"]
+    obs = robot.observe()
+    assert obs["cube"][:2] == pytest.approx(reply["pour_point"])
+    assert not obs["cube_inside_bin"]
+    assert obs["robot"] == pytest.approx(reply["stand"])
+
+
+def test_the_fake_robot_refuses_a_bin_across_the_barrier():
+    """Across the barrier the fake refuses like the real dump: nothing moves."""
+    robot = FakeTossingRobot()  # its default bin is at the close spot
+    far = BinFit(0.24, 1.40, 0.0, 0.365, 0.26, 0.384, 0.005)
+    robot.bin_fit = far
+    before = list(robot.robot)
+    reply = robot.dump_bin()
+    assert reply["refused"] and robot.robot == before
+    assert not robot.can_dump_bin()["feasible"]
+
+
+def test_a_failed_fake_dump_leaves_the_cube_in_the_bin():
+    """``dump_outcomes`` False: no grip on the rim; the cube stays in the bin."""
+    robot = FakeTossingRobot(
+        bin_fit=_NEAR_FIT, cube=(0.4, -0.7, 0.0), dump_outcomes=(False,)
+    )
+    reply = robot.dump_bin()
+    assert not reply["dumped"] and not reply["refused"]
+    assert "rim" in reply["note"]
+    assert robot.observe()["cube_inside_bin"]
+
+
+def test_an_angular_dump_never_streams_to_a_released_arm():
+    """Under the onboard controller the arm server's torque loop is stopped, and
+    its one-slot command queue is read by nothing: a streamed hold (every base
+    drive tick sends one) blocks forever (2026-11-02, the first real dump hung at
+    its hover). The fake arm refuses one, and the dump hands the arm back to the
+    torque loop around each base move."""
+    skills = build_skills(_cfg(**{"pick.top_down.arm_controller": "angular"}))
+    _bin_near(skills)
+    reply = skills.dump_bin()
+    assert reply["dumped"], reply
+    assert not skills.arm.released
+
+
+def test_the_fake_arm_refuses_a_streamed_command_while_released():
+    """The fake models the real arm server: nothing reads the queue while the
+    torque loop is released."""
+    arm = FakeArmInterface()
+    arm.release()
+    with pytest.raises(RuntimeError, match="released"):
+        arm.execute_action([0.0] * 7, 0.0)
+
+
+def test_an_angular_dump_sends_each_multi_waypoint_stage_as_one_trajectory():
+    """Under the onboard controller every waypoint used to be its own stop-and-go
+    move (16 in the roll, 2026-11-02 run 54). Each stage with several waypoints is
+    now one continuous trajectory through them."""
+    skills = build_skills(_cfg(**{"pick.top_down.arm_controller": "angular"}))
+    _bin_near(skills)
+    reply = skills.dump_bin()
+    assert reply["dumped"], reply
+    paths = [p for p in skills.arm.trajectories if len(p) > 1]
+    assert len(paths) >= 4  # lift, roll, unroll, lower
+    assert max(len(p) for p in paths) >= 12  # the 160-degree roll
+
+
+def test_a_dump_whose_trajectory_fails_after_the_grasp_lets_go_and_reports():
+    """An arm error after the rim is gripped (2026-11-02: the lift's trajectory was
+    rejected) is a stop-short reply, not an exception, and the gripper opens and backs
+    off rather than leaving the bin held."""
+    skills = build_skills(_cfg(**{"pick.top_down.arm_controller": "angular"}))
+    _bin_near(skills)
+
+    def rejected(path):
+        raise ValueError("waypoint trajectory rejected by the arm")
+
+    skills.arm.move_trajectory = rejected
+    reply = skills.dump_bin()
+    assert not reply["dumped"] and not reply["refused"]
+    assert "rejected" in reply["note"]
+    assert skills.arm.get_gripper_state() < 0.5
+    assert skills.gripper_command == 0.0
