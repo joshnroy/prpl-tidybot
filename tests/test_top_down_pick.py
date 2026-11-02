@@ -14,6 +14,7 @@ from prpl_tidybot.top_down_pick import (
     TopDownPickGeometry,
     arm_frame_target,
     cube_closing_yaw,
+    finger_axis,
     forward_kinematics,
     geometry_from_config,
     grasp_search_bounds,
@@ -198,16 +199,39 @@ def _axis_gap(a, b):
     return abs((a - b + math.pi / 2) % math.pi - math.pi / 2)
 
 
-@pytest.mark.parametrize("axis_deg", range(-180, 180, 15))
+def test_the_finger_axis_is_the_direction_the_pads_move():
+    """finger_axis is the pinch frame's x: in the robot's MuJoCo model the 2F-85's
+    pads open and close along it, with nothing along y (2026-11-02: the code had
+    taken y; invisible on the 90-degree-symmetric cube, it put a bottle grasp along
+    the bottle)."""
+    xml = (
+        resources.files("kinder") / "envs/dynamic3d/models/stanford_tidybot/tidybot.xml"
+    )
+    model = mujoco.MjModel.from_xml_path(str(xml))  # pylint: disable=no-member
+    data = mujoco.MjData(model)  # pylint: disable=no-member
+    site = model.site("pinch_site").id
+    mujoco.mj_kinematics(model, data)  # pylint: disable=no-member
+    rot = data.site_xmat[site].reshape(3, 3)
+    left = rot.T @ (data.xpos[model.body("left_pad").id] - data.site_xpos[site])
+    right = rot.T @ (data.xpos[model.body("right_pad").id] - data.site_xpos[site])
+    span = left - right
+    assert abs(span[0]) > 0.05 and abs(span[1]) < 1e-6
+    q = top_down_joint_targets(0.55, 0.0, 0.3, GEOM)[1]
+    pos, approach, _ = forward_kinematics(q, GEOM)
+    assert abs(float(np.dot(finger_axis(q, GEOM), approach))) < 1e-9
+
+
+@pytest.mark.parametrize("axis_deg", range(-180, 180, 30))
 def test_a_bottle_is_grasped_across_its_axis(axis_deg):
-    """A bottle repeats every 180 degrees and the 2F-85 spans its 66 mm width, not its
-    20 cm length: the fingers close perpendicular to the axis, the wrist turning at
-    most 90 degrees."""
-    geom = TopDownPickGeometry(symmetry=math.pi, wrist_yaw_offset=math.pi / 2)
+    """With +object=bottle's geometry the pads close perpendicular to the bottle's
+    axis (the 2F-85 spans its 66 mm width, not its 20 cm length), measured on the
+    joints the pick commands, not on the angle it computes."""
+    cfg = OmegaConf.create({"symmetry_deg": 180.0, "wrist_yaw_offset_deg": 0.0})
+    geom = geometry_from_config(cfg)
     axis = math.radians(axis_deg)
-    closing = cube_closing_yaw(axis, geom)
-    assert _axis_gap(closing, axis) == pytest.approx(math.pi / 2)
-    assert -math.pi / 2 <= closing < math.pi / 2
+    _, grasp = top_down_joint_targets(0.55, 0.0, axis, geom)
+    fx, fy, _ = finger_axis(grasp, geom)
+    assert _axis_gap(math.atan2(fy, fx), axis) == pytest.approx(math.pi / 2, abs=0.03)
 
 
 def test_a_cube_still_folds_every_90_degrees():
