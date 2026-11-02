@@ -12,6 +12,7 @@ from prpl_tidybot.bin_localizer import BinFit
 from prpl_tidybot.bin_pour import (
     BinPourGeometry,
     bin_points_in_hand,
+    densify,
     joint_limits,
     plan_bin_pour,
     pour_point,
@@ -144,11 +145,12 @@ def test_the_lift_raises_the_bin_clear_of_the_floor(plan):
 
 
 def test_no_arm_move_jumps_ik_branches(plan):
-    """Every joint changes by under 0.5 rad between consecutive waypoints, so the
-    streamed moves cannot swing the arm through an unplanned configuration."""
+    """Every joint changes by under 0.5 rad between consecutive finely planned
+    waypoints, so the IK never jumps branch along the path (the moves themselves keep
+    fewer of them, checked against this path)."""
     previous = None
     for stage in plan.stages:
-        for q in stage.arm:
+        for q in stage.fine:
             if previous is not None:
                 step = np.abs((np.array(q) - previous + np.pi) % (2 * np.pi) - np.pi)
                 assert step.max() < 0.5, stage.name
@@ -193,7 +195,7 @@ def test_the_tip_is_far_enough_to_empty_the_bin(plan):
     """Past 90 degrees the opening faces down; the default rolls 160 (the simulator
     180)."""
     assert POUR.tilt >= math.radians(150)
-    assert len(next(s for s in plan.stages if s.name == "tip").arm) >= 12
+    assert len(next(s for s in plan.stages if s.name == "tip").fine) >= 12
 
 
 def test_a_stand_the_workspace_rejects_is_not_chosen():
@@ -214,3 +216,42 @@ def test_the_pour_point_is_beside_the_bin_and_off_the_base(plan):
     sx, sy, _ = plan.stand
     assert math.hypot(x - BIN.x, y - BIN.y) > 0.5
     assert math.hypot(x - sx, y - sy) > 0.35
+
+
+def _joint_line(a, b, u):
+    d = (np.array(b) - np.array(a) + np.pi) % (2 * np.pi) - np.pi
+    return np.array(a) + u * d
+
+
+def test_each_stage_keeps_only_the_waypoints_its_path_needs(plan):
+    """Every waypoint is its own onboard move, which stops: the roll keeps a handful
+    of its 16 planned points, not all of them (2026-11-02: 16 stops looked janky)."""
+    tip = next(s for s in plan.stages if s.name == "tip")
+    assert 2 <= len(tip.arm) <= 5
+
+
+def test_the_arm_moving_straight_between_kept_waypoints_stays_on_the_path(plan):
+    """The arm interpolates each move in joint space; between kept waypoints the held
+    bin's rim stays within the tolerance of the finely planned roll, and every joint
+    stays inside its limits."""
+    PLAN_FACE[0] = plan.face
+    lo, hi = joint_limits(GEOM)
+    previous = None
+    for stage in plan.stages:
+        if previous is not None and stage.name in ("lift", "tip", "untip", "lower"):
+            fine = [
+                bin_points_in_hand(q, GEOM, POUR, _across(), plan.side, BIN)[1]
+                for q in densify([previous, *stage.fine])
+            ]
+            start = previous
+            for q in stage.arm:
+                for u in np.linspace(0.0, 1.0, 11):
+                    j = _joint_line(start, q, u)
+                    assert np.all(j >= lo - 1e-9) and np.all(j <= hi + 1e-9)
+                    rim = bin_points_in_hand(j, GEOM, POUR, _across(), plan.side, BIN)[
+                        1
+                    ]
+                    gap = min(np.linalg.norm(rim - f) for f in fine)
+                    assert gap <= POUR.path_tolerance + 0.005, stage.name
+                start = q
+        previous = stage.arm[-1]
