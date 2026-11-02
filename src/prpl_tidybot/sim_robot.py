@@ -574,6 +574,18 @@ class SimKortexArm:
         self.world.last_angular_path_deg = path
         self.world.play_arm_path(np.radians(path))
 
+    def move_angular_waypoints(
+        self,
+        path_deg: Sequence[Sequence[float]],
+        durations: Sequence[float],
+        timeout: float | None = None,
+    ) -> None:
+        """The onboard waypoint trajectory, as consecutive joint moves (the sim plays
+        the same path; the real arm blends through the waypoints)."""
+        del durations, timeout
+        for angles in path_deg:
+            self.move_angular(angles)
+
     def get_measured_joint_angles(self) -> list[float]:
         """Joint angles in [0, 360) degrees, as Kortex reports them."""
         return [float(v) for v in np.degrees(self.world.q) % 360.0]
@@ -675,6 +687,12 @@ class SimArmInterface(ArmInterface):
 
     def move_angular(self, goal: list[float]) -> list[float]:
         return [float(v) for v in self.server.move_joints_angular(list(goal))]
+
+    def move_trajectory(self, path: list[list[float]]) -> list[float]:
+        return [
+            float(v)
+            for v in self.server.move_joints_trajectory([list(q) for q in path])
+        ]
 
     def set_gripper_angular(self, position: float, timeout: float = 4.0) -> float:
         return float(self.server.gripper_angular(position, timeout))

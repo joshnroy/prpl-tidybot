@@ -57,6 +57,17 @@ class RealArmInterface(ArmInterface):
             stop_arm_motion()
             raise ArmMotionAborted("Ctrl-C during an angular move; arm stopped") from e
 
+    def move_trajectory(self, path: list[list[float]]) -> list[float]:
+        """One blocking onboard trajectory through the waypoints on the arm server;
+        Ctrl-C stops the arm directly, as ``move_angular``."""
+        try:
+            return list(
+                self.arm.move_joints_trajectory([[float(v) for v in q] for q in path])
+            )
+        except KeyboardInterrupt as e:
+            stop_arm_motion()
+            raise ArmMotionAborted("Ctrl-C during a trajectory; arm stopped") from e
+
     def set_gripper_angular(self, position: float, timeout: float = 4.0) -> float:
         """Gripper move on the arm server; Ctrl-C stops the arm as above."""
         try:

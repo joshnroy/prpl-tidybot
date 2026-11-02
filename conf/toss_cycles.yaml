@@ -295,7 +295,8 @@ dump_bin:
   lift_step: 0.08
   # Pinch point inside the wall's outer face (the rolled lip) and below the rim.
   rim_inset: 0.012
-  below_rim: 0.03
+  # 2 cm (was 3): the pads clear the rolled lip on the way down (Josh, 2026-11-02).
+  below_rim: 0.02
   hover: 0.15
   empty_s: 2.0
   swing_margin: 0.3

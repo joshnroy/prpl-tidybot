@@ -63,7 +63,7 @@ class BinPourGeometry:  # pylint: disable=too-many-instance-attributes
     # The pinch point sits this far inside the wall's outer face (the rolled lip and
     # the wall between the pads) and this far below the rim.
     rim_inset: float = 0.012
-    below_rim: float = 0.03
+    below_rim: float = 0.02
     hover: float = 0.15
     # The pinch point's height above the floor while the bin is up and rolled: what
     # the arm's reach depends on, whatever the bin's height (the blue bin, rim at

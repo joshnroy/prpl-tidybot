@@ -326,6 +326,47 @@ class TorqueControlledArm:
         finally:
             self.base.Unsubscribe(notification_handle)
 
+    def move_angular_waypoints(self, path_deg, durations, timeout=None):
+        # One onboard joint trajectory through the waypoints (degrees, modulo 360),
+        # each reached ``durations[i]`` s after the one before: the arm moves through
+        # them continuously instead of stopping at each, as separate REACH_JOINT_ANGLES
+        # moves do. Validated on the arm first; an invalid list raises before moving.
+        assert not self.cyclic_running, "Arm must be in high-level servoing mode"
+        base_servo_mode = Base_pb2.ServoingModeInformation()
+        base_servo_mode.servoing_mode = Base_pb2.SINGLE_LEVEL_SERVOING
+        self.base.SetServoingMode(base_servo_mode)
+        waypoints = Base_pb2.WaypointList()
+        waypoints.duration = 0.0
+        waypoints.use_optimal_blending = False
+        for i, (angles, duration) in enumerate(zip(path_deg, durations)):
+            waypoint = waypoints.waypoints.add()
+            waypoint.name = f"waypoint_{i}"
+            waypoint.angular_waypoint.angles.extend([float(a) for a in angles])
+            waypoint.angular_waypoint.duration = float(duration)
+        report = self.base.ValidateWaypointList(waypoints)
+        errors = report.trajectory_error_report.trajectory_error_elements
+        if len(errors) > 0:
+            raise ValueError(f"waypoint trajectory rejected by the arm: {errors}")
+        end_or_abort_event = threading.Event()
+
+        def check(notification):
+            if notification.action_event in [
+                Base_pb2.ACTION_END,
+                Base_pb2.ACTION_ABORT,
+            ]:
+                end_or_abort_event.set()
+
+        notification_handle = self.base.OnNotificationActionTopic(
+            check, Base_pb2.NotificationOptions()
+        )
+        try:
+            self.base.ExecuteWaypointTrajectory(waypoints)
+            end_or_abort_event.wait(
+                timeout if timeout is not None else sum(durations) + 10.0
+            )
+        finally:
+            self.base.Unsubscribe(notification_handle)
+
     def get_measured_joint_angles(self):
         # High-level joint angles in degrees (valid outside the cyclic loop).
         joint_angles = self.base.GetMeasuredJointAngles()
@@ -681,3 +722,29 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def angular_waypoint_durations(start_deg, path_deg, speed_deg_s, minimum_s):
+    """Each waypoint's duration (s) from the one before (the first from ``start_deg``):
+    its largest joint change, the short way round, at ``speed_deg_s``, at least
+    ``minimum_s``."""
+    durations = []
+    previous = list(start_deg)
+    for angles in path_deg:
+        change = max(
+            abs((float(a) - float(b) + 180.0) % 360.0 - 180.0)
+            for a, b in zip(angles, previous)
+        )
+        durations.append(max(float(minimum_s), change / float(speed_deg_s)))
+        previous = list(angles)
+    return durations
+
+
+def crosses_wrap(path_deg):
+    """Whether a joint's angle (sent to the arm modulo 360) passes 0/360 between
+    consecutive waypoints, where a trajectory could take the long way round."""
+    for a, b in zip(path_deg, path_deg[1:]):
+        for x, y in zip(a, b):
+            if abs(float(x) % 360.0 - float(y) % 360.0) > 180.0:
+                return True
+    return False

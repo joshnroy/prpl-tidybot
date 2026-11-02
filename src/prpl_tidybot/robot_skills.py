@@ -1173,10 +1173,9 @@ def _dump_bin(  # pylint: disable=too-many-arguments,too-many-positional-argumen
                         mover.move("dump_withdraw", list(plan.stages[0].arm[-1]))
                         return f"no grip on the bin's rim (gripper read {reading:.2f})"
                 continue
-            for k, q in enumerate(stage.arm):
-                if not mover.move(f"dump_{stage.name}_{k}", list(q)):
-                    held = " (the bin is still held)" if stage.gripper > 0.5 else ""
-                    return f"dump: {stage.name} did not arrive{held}"
+            if not mover.move_path(f"dump_{stage.name}", [list(q) for q in stage.arm]):
+                held = " (the bin is still held)" if stage.gripper > 0.5 else ""
+                return f"dump: {stage.name} did not arrive{held}"
             if stage.hold_s:
                 time.sleep(stage.hold_s)
     finally:
@@ -1235,6 +1234,14 @@ class _Mover:
         it.
         """
         raise NotImplementedError
+
+    def move_path(self, name: str, path: list[list[float]]) -> bool:
+        """Move through the waypoints; return whether it arrived at the last. By
+        default one move per waypoint (the compliant loop streams each)."""
+        for k, goal in enumerate(path):
+            if not self.move(f"{name}_{k}", list(goal)):
+                return False
+        return True
 
     def gripper(self, position: float) -> float:
         """Move the gripper; return where it stopped."""
@@ -1303,6 +1310,21 @@ class _AngularMover(_Mover):
             raise
         self._joints = list(measured)
         return bool(self._record(name, goal, list(measured))["reached"])
+
+    def move_path(self, name: str, path: list[list[float]]) -> bool:
+        """One continuous onboard trajectory through the waypoints, not a stop at
+        each (the dump's 16-waypoint roll was 16 stop-and-go moves)."""
+        if len(path) == 1:
+            return self.move(name, list(path[0]))
+        self.arm.note_step(name)
+        try:
+            self.check_stop()
+            measured = self.arm.move_trajectory([list(q) for q in path])
+        except ArmMotionAborted:
+            self._aborted = True
+            raise
+        self._joints = list(measured)
+        return bool(self._record(name, list(path[-1]), list(measured))["reached"])
 
     def gripper(self, position: float) -> float:
         self.arm.note_step(f"gripper to {position:.2f}")
