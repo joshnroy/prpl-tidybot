@@ -858,3 +858,21 @@ def test_an_angular_dump_sends_each_multi_waypoint_stage_as_one_trajectory():
     paths = [p for p in skills.arm.trajectories if len(p) > 1]
     assert len(paths) >= 4  # lift, roll, unroll, lower
     assert max(len(p) for p in paths) >= 12  # the 160-degree roll
+
+
+def test_a_dump_whose_trajectory_fails_after_the_grasp_lets_go_and_reports():
+    """An arm error after the rim is gripped (2026-11-02: the lift's trajectory was
+    rejected) is a stop-short reply, not an exception, and the gripper opens and backs
+    off rather than leaving the bin held."""
+    skills = build_skills(_cfg(**{"pick.top_down.arm_controller": "angular"}))
+    _bin_near(skills)
+
+    def rejected(path):
+        raise ValueError("waypoint trajectory rejected by the arm")
+
+    skills.arm.move_trajectory = rejected
+    reply = skills.dump_bin()
+    assert not reply["dumped"] and not reply["refused"]
+    assert "rejected" in reply["note"]
+    assert skills.arm.get_gripper_state() < 0.5
+    assert skills.gripper_command == 0.0

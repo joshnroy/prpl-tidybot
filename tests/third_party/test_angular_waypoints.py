@@ -6,20 +6,28 @@ import pytest
 from prpl_tidybot.third_party.kinova import angular_waypoint_durations, crosses_wrap
 
 
-def test_each_segment_takes_its_largest_joint_change_at_the_speed():
-    """A segment's duration is its largest joint change over the speed, at least the
-    minimum."""
+def test_each_segment_is_timed_within_the_arms_speed_and_acceleration():
+    """The arm interpolates between waypoints with a peak speed well above the
+    average and accelerates within each segment; the 2026-11-02 lift was rejected
+    (35 deg/s against 30, 200 deg/s^2 against 80). Each segment's average speed stays
+    under half the speed limit and its change over the squared duration under a sixth
+    of the acceleration limit."""
     start = [0.0] * 7
-    path = [[10.0] + [0.0] * 6, [10.0, 40.0] + [0.0] * 5, [10.0, 40.0] + [0.0] * 5]
-    durations = angular_waypoint_durations(start, path, speed_deg_s=20.0, minimum_s=0.3)
-    assert durations == pytest.approx([0.5, 2.0, 0.3])
+    path = [[2.0] + [0.0] * 6, [2.0, 40.0] + [0.0] * 5]
+    durations = angular_waypoint_durations(
+        start, path, speed_deg_s=30.0, accel_deg_s2=80.0, minimum_s=0.3
+    )
+    for change, duration in zip((2.0, 40.0), durations):
+        assert change / duration <= 0.5 * 30.0 + 1e-9
+        assert change / duration**2 <= 80.0 / 6.0 + 1e-9
+    assert durations[0] >= 0.3
 
 
 def test_the_short_way_round_is_measured():
     """359 -> 1 degrees is a 2-degree change, not 358."""
     start = [359.0] + [0.0] * 6
     durations = angular_waypoint_durations(
-        start, [[1.0] + [0.0] * 6], speed_deg_s=2.0, minimum_s=0.0
+        start, [[1.0] + [0.0] * 6], speed_deg_s=4.0, accel_deg_s2=1e9, minimum_s=0.0
     )
     assert durations == pytest.approx([1.0])
 

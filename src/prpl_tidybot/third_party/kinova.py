@@ -724,10 +724,15 @@ if __name__ == "__main__":
     main()
 
 
-def angular_waypoint_durations(start_deg, path_deg, speed_deg_s, minimum_s):
-    """Each waypoint's duration (s) from the one before (the first from ``start_deg``):
-    its largest joint change, the short way round, at ``speed_deg_s``, at least
-    ``minimum_s``."""
+def angular_waypoint_durations(
+    start_deg, path_deg, speed_deg_s, accel_deg_s2, minimum_s
+):
+    """Each waypoint's duration (s) from the one before (the first from ``start_deg``),
+    from its largest joint change (the short way round): an average speed of at most
+    half ``speed_deg_s`` and a change of at most ``accel_deg_s2 / 6`` per squared
+    second, at least ``minimum_s``. The arm's interpolation peaks well above the
+    average speed and accelerates within the segment: timed at the average alone, the
+    2026-11-02 lift was rejected (35 deg/s against 30, 200 deg/s^2 against 80)."""
     durations = []
     previous = list(start_deg)
     for angles in path_deg:
@@ -735,7 +740,13 @@ def angular_waypoint_durations(start_deg, path_deg, speed_deg_s, minimum_s):
             abs((float(a) - float(b) + 180.0) % 360.0 - 180.0)
             for a, b in zip(angles, previous)
         )
-        durations.append(max(float(minimum_s), change / float(speed_deg_s)))
+        durations.append(
+            max(
+                float(minimum_s),
+                change / (0.5 * float(speed_deg_s)),
+                math.sqrt(6.0 * change / float(accel_deg_s2)),
+            )
+        )
         previous = list(angles)
     return durations
 
