@@ -642,7 +642,7 @@ def _dump_bin(  # pylint: disable=too-many-arguments,too-many-positional-argumen
         f"Drive to the dump standoff ({plan.stand[0]:+.3f}, {plan.stand[1]:+.3f}, "
         f"{math.degrees(plan.stand[2]):+.0f} deg)"
     )
-    base = _drive_to(real_env, list(plan.stand), workspace, stop, bin_fit)
+    _drive_to(real_env, list(plan.stand), workspace, stop, bin_fit)
     td = cfg.pick.top_down
     moves: list[dict[str, Any]] = record.setdefault("moves", [])
     mover: _Mover = (
@@ -652,13 +652,20 @@ def _dump_bin(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     )
     mover.stop = stop
     mover.begin()
+    planned = plan.stand
     try:
         for stage in plan.stages:
             step(f"dump: {stage.name}")
             entry: dict[str, Any] = {"stage": stage.name}
             stages.append(entry)
-            if any(abs(a - b) > 1e-6 for a, b in zip(stage.base, base)):
-                base = _drive_to(real_env, list(stage.base), None, stop, None)
+            if any(abs(a - b) > 1e-6 for a, b in zip(stage.base, planned)):
+                # Each drive tick streams a hold to the arm, which only the torque
+                # loop reads: hand the arm back to it for the turn (under the onboard
+                # controller the queue fills and the arm server blocks for good).
+                mover.end()
+                _drive_to(real_env, list(stage.base), None, stop, None)
+                mover.begin()
+                planned = stage.base
             if stage.name in ("close", "open"):
                 reading = read(mover.gripper(stage.gripper))
                 entry["gripper"] = reading

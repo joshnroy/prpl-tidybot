@@ -823,3 +823,25 @@ def test_a_failed_fake_dump_leaves_the_cube_in_the_bin():
     assert not reply["dumped"] and not reply["refused"]
     assert "rim" in reply["note"]
     assert robot.observe()["cube_inside_bin"]
+
+
+def test_an_angular_dump_never_streams_to_a_released_arm():
+    """Under the onboard controller the arm server's torque loop is stopped, and
+    its one-slot command queue is read by nothing: a streamed hold (every base
+    drive tick sends one) blocks forever (2026-11-02, the first real dump hung at
+    its hover). The fake arm refuses one, and the dump hands the arm back to the
+    torque loop around each base move."""
+    skills = build_skills(_cfg(**{"pick.top_down.arm_controller": "angular"}))
+    _bin_near(skills)
+    reply = skills.dump_bin()
+    assert reply["dumped"], reply
+    assert not skills.arm.released
+
+
+def test_the_fake_arm_refuses_a_streamed_command_while_released():
+    """The fake models the real arm server: nothing reads the queue while the
+    torque loop is released."""
+    arm = FakeArmInterface()
+    arm.release()
+    with pytest.raises(RuntimeError, match="released"):
+        arm.execute_action([0.0] * 7, 0.0)
