@@ -507,11 +507,13 @@ def _interpolate_at_arc(
     Theta is linearly interpolated with shortest-arc wrap so that
     +pi-epsilon / -pi-epsilon segments don't take the long way around.
     """
-    if arc <= 0.0:
-        wp = waypoints[0]
-        return wp.x, wp.y, wp.theta
+    # The end first: a pure rotation's path has no length, so its arc is both 0 and
+    # the total, and only the final waypoint carries the heading to turn to.
     if arc >= cumulative[-1]:
         wp = waypoints[-1]
+        return wp.x, wp.y, wp.theta
+    if arc <= 0.0:
+        wp = waypoints[0]
         return wp.x, wp.y, wp.theta
     for i in range(1, len(waypoints)):
         if cumulative[i] >= arc:
