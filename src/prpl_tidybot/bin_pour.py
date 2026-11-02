@@ -22,9 +22,6 @@ stages. Frames: the map frame for the base, the arm's base frame for the arm (as
 
 from __future__ import annotations
 
-# mujoco is a compiled extension; pylint cannot see its members.
-# pylint: disable=no-member
-
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -42,6 +39,10 @@ from prpl_tidybot.top_down_pick import (  # pylint: disable=protected-access
     _solver,
     forward_kinematics,
 )
+
+# mujoco is a compiled extension; pylint cannot see its members.
+# pylint: disable=no-member
+
 
 # A joint may change by at most this (rad) between consecutive waypoints.
 _MAX_STEP = 0.5

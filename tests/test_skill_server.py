@@ -1070,6 +1070,8 @@ def test_observe_with_the_ceiling_cameras_is_one_shared_look(skills):
     assert obs["cube_inside_bin"] is True and obs["cube_in_bin"] is True
     assert obs["cube_upright"] is True
     assert set(obs["can_pick"]) == CAN_PICK_KEYS
+
+
 # ------------------------------------------------------------------ dump the bin
 
 # A bin on the robot's side of the barrier, where the dump can reach it.

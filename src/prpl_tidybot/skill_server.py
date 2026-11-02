@@ -109,7 +109,6 @@ from prpl_tidybot.aimed_toss import (
 )
 from prpl_tidybot.bin_localizer import BinFit, ConstantBinSource, cube_in_bin
 from prpl_tidybot.bin_pour import BinPourGeometry
-from prpl_tidybot.sim_robot import SimBinSource
 from prpl_tidybot.interfaces.arm_interface import ArmInterface, ArmMotionAborted
 from prpl_tidybot.interfaces.base_interface import RealBaseInterface
 from prpl_tidybot.motion_log import MarkerPoseReader, MotionLog, se2_xyt
@@ -132,6 +131,7 @@ from prpl_tidybot.robot_skills import (
     plan_pick,
     pour_geometry_from_config,
 )
+from prpl_tidybot.sim_robot import SimBinSource
 from prpl_tidybot.top_down_pick import (
     TopDownPickGeometry,
     geometry_from_config,
