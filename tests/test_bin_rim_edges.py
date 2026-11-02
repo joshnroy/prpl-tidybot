@@ -196,9 +196,10 @@ def test_an_unknown_method_is_refused(far_frame):
         _source(far_frame, (1.1, -0.78), method="colour")
 
 
-def test_the_skill_server_config_selects_rim_edges():
-    """conf/skill_server.yaml runs the rim-edge detector on the real bin; the saturation
-    thresholds stay beside it as the fallback."""
+def test_the_skill_server_config_keeps_rim_edges_beside_the_blue_bins_hue_mask():
+    """conf/skill_server.yaml finds the blue bin by hue and saturation (the 2026-11-02
+    real runs); the rim-edge detector's thresholds, frozen on the retired cardboard
+    box, stay configured for when it is measured on this bin."""
     from hydra import (  # pylint: disable=import-outside-toplevel
         compose,
         initialize_config_dir,
@@ -208,8 +209,9 @@ def test_the_skill_server_config_selects_rim_edges():
     with initialize_config_dir(version_base=None, config_dir=str(conf)):
         cfg = compose(config_name="skill_server", overrides=["mode=fake"])
     real = cfg.bin.pipelines.real
-    assert cfg.bin.method == "rim_edges"
-    assert real.method == "rim_edges"
+    assert cfg.bin.method == "saturation"
+    assert real.method == "saturation"
+    assert list(real.hue_range) == [100, 145]
+    assert real.min_saturation == pytest.approx(50.0)
     assert real.rim_min_score == pytest.approx(0.014)
     assert real.rim_max_darkness == pytest.approx(-0.3)
-    assert dict(real.min_saturation) == {"AD8A29AE": 160.0, "5A5C29AE": 130.0}

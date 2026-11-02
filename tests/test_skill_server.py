@@ -317,7 +317,10 @@ def test_a_cube_in_a_tight_corner_is_refused_cleanly_before_any_motion(monkeypat
     """3 cm from two walls none of the 1612 grasps keeps the 1 cm margin: the pick is
     refused before any arm, gripper or base command, and the reason says it is a corner
     and, for each pair of faces, what binds."""
-    hl, hw = 0.5 * 0.39 - 0.005, 0.5 * 0.29 - 0.005  # the bin's inner half extents
+    measured = _cfg().bin
+    # The bin's inner half extents at the rim.
+    hl = 0.5 * measured.length - measured.wall
+    hw = 0.5 * measured.width - measured.wall
     cube = f"[{CLOSE_BIN[0] - hw + 0.03},{CLOSE_BIN[1] + hl - 0.03},0.025]"
     skills = build_skills(_cfg(**{"env.cube_pose": cube}))
     commands = []
