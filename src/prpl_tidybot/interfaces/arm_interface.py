@@ -131,6 +131,11 @@ class FakeArmInterface(ArmInterface):
         return self.gripper_state
 
     def execute_action(self, arm_goal: list[float], gripper_goal: float) -> None:
+        if self.released:
+            # The real arm server queues a streamed command for the torque loop in a
+            # one-slot queue, which nothing reads while the loop is released: the
+            # second put() blocks forever.
+            raise RuntimeError("execute_action while released: the arm server hangs")
         self.arm_state = list(arm_goal)
         self.gripper_state = gripper_goal
 
