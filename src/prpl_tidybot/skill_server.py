@@ -332,6 +332,9 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
         self.upright_min_iou = (
             0.75 if server is None else float(server.get("upright_min_iou", 0.75))
         )
+        self.held_object_visible = server is not None and bool(
+            server.get("held_object_visible", False)
+        )
         self.in_bin = _in_bin_pick(cfg)
         self.spot_directions = _spot_directions(cfg)
         box = cfg.get("bin_stop_box")
@@ -405,6 +408,11 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
         that follows with no motion between."""
         motions = self.motions
         bin_fit, cube, missing = self._see()
+        if cube is not None and self.held_object_visible and self._held_reading():
+            # The object in the hand is still in view (the bottle sticks out of the
+            # gripper) and projects onto the floor far from it: that is not a second
+            # object on the floor, so the held reading alone says holding.
+            cube, missing = None, "held"
         self._look = _Look(bin_fit, cube, missing, motions)
         return self._look
 

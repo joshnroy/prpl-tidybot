@@ -64,6 +64,11 @@ skill_server:
   # this IoU (a cube resting on a face fits at ~0.9; the localizer drops a fit below
   # its own min_iou, 0.6).
   upright_min_iou: 0.75
+  # observe()["holding"] is the held gripper reading with the cube out of sight (a
+  # person may take it out of the closed gripper; pilot run9). True: the held reading
+  # alone, and a look while holding drops the object it sees, for an object the
+  # cameras still see in the hand (+object=bottle).
+  held_object_visible: false
 
 recording:
   # The skill server samples the arm's joints, the gripper, the base's odometry and
