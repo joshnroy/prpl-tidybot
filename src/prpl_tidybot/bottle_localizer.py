@@ -81,7 +81,7 @@ class BottleFit:
 def bottle_mask(
     bgr: NDArray[np.uint8], model: BottleModel = BottleModel()
 ) -> NDArray[np.uint8]:
-    """1 where a pixel has the label's colour, holes (white print) filled."""
+    """1 inside the convex hull of each blob of the label's colour (its print filled)."""
     hsv: Any = cv.cvtColor(bgr, cv.COLOR_BGR2HSV)
     hue = hsv[:, :, 0]
     mask: Any = np.zeros(hue.shape, bool)
@@ -91,7 +91,10 @@ def bottle_mask(
     mask = cv.morphologyEx(mask.astype(np.uint8), cv.MORPH_CLOSE, np.ones((3, 3)))
     contours, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
     filled = np.zeros_like(mask)
-    cv.drawContours(filled, contours, -1, (1,), thickness=cv.FILLED)
+    # Each blob's convex hull: the label's dark print and white stripe can reach its
+    # edge (2026-11-05: a third of the label), so they are notches, not holes.
+    hulls = [cv.convexHull(c) for c in contours]
+    cv.drawContours(filled, hulls, -1, (1,), thickness=cv.FILLED)
     return filled.astype(np.uint8)
 
 

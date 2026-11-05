@@ -547,6 +547,7 @@ def test_the_bottle_counts_a_held_reading_as_held():
     with initialize_config_dir(version_base=None, config_dir=str(_CONF_DIR)):
         bottle = compose(config_name="skill_server", overrides=["+object=bottle"])
     assert bottle.skill_server.held_object_visible is True
+    assert bottle.env.pipelines.real.perceiver.target_source.min_iou == 0.7
     assert _cfg().skill_server.held_object_visible is False
 
 

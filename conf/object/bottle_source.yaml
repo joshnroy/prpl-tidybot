@@ -11,3 +11,7 @@ env:
           length: 0.20
           diameter: 0.066
           label_length: 0.10
+          # The label's fill is each red blob's convex hull, so a bottle with its dark
+          # print up scores ~0.84 (2026-11-05 real frame); the clear bottle on the
+          # desk scored 0.60. 0.7 keeps both margins.
+          min_iou: 0.7
