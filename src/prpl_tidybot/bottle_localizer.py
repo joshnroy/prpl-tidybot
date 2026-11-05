@@ -128,6 +128,71 @@ def _valid_rows(rows: int, cols: int, index: int, num: int) -> NDArray[np.float3
     return valid
 
 
+# Inside the bin the label is in the walls' shadow: near black (HSV value ~18 on
+# 2026-11-05) and mostly hidden, so it is found as dark, saturated red in the bin's
+# opening rather than fitted. The rug's pink stays below this saturation.
+_IN_BIN_MIN_SATURATION = 150
+_IN_BIN_MIN_VALUE = 10
+_IN_BIN_MIN_PIXELS = 30
+
+
+def find_bottle_in_box(  # pylint: disable=too-many-locals
+    frames: Sequence[NDArray[np.uint8]],
+    cameras: Sequence[CeilingCamera],
+    model: BottleModel,
+    box: Sequence[float],
+    rim_height: float,
+) -> tuple[float, float, float] | None:
+    """The bottle's (x, y, yaw) inside the floor box ``box`` (x_min, x_max, y_min,
+    y_max; the bin), or None: label-red pixels seen through the box's top at
+    ``rim_height``, from the camera that sees the most, cast down to the bottle's axis
+    height. The yaw is the red pixels' long axis on the floor (0 for a round blob)."""
+    corners = np.array(
+        [[x, y, rim_height] for x in box[:2] for y in box[2:]], dtype=np.float64
+    )
+    best: tuple[int, int, NDArray[np.float64]] | None = None
+    for i, camera in enumerate(cameras):
+        imgs = [_split(f, len(cameras))[i] for f in frames]
+        rows, cols = imgs[0].shape[:2]
+        region = np.zeros((rows, cols), np.uint8)
+        hull = cv.convexHull(camera.project(corners).astype(np.float32)).astype(
+            np.int32
+        )
+        cv.fillConvexPoly(region, hull, (1,))
+        region &= _valid_rows(rows, cols, i, len(cameras)).astype(np.uint8)
+        votes = np.zeros((rows, cols), np.float32)
+        for img in imgs:
+            hsv: Any = cv.cvtColor(img, cv.COLOR_BGR2HSV)
+            red = np.zeros((rows, cols), bool)
+            for lo, hi in model.hue_ranges:
+                red |= (hsv[:, :, 0] >= lo) & (hsv[:, :, 0] <= hi)
+            red &= (hsv[:, :, 1] >= _IN_BIN_MIN_SATURATION) & (
+                hsv[:, :, 2] >= _IN_BIN_MIN_VALUE
+            )
+            votes += red & (region > 0)
+        pixels = np.argwhere(votes >= len(imgs) / 2)
+        if len(pixels) >= _IN_BIN_MIN_PIXELS and (
+            best is None or len(pixels) > best[1]
+        ):
+            best = (i, len(pixels), pixels)
+    if best is None:
+        return None
+    camera = cameras[best[0]]
+    floor = np.array(
+        [camera.to_floor(float(u), float(v), model.diameter / 2) for v, u in best[2]]
+    )
+    x, y = floor.mean(axis=0)
+    spread = np.cov((floor - [x, y]).T)
+    evals, evecs = np.linalg.eigh(spread)
+    yaw = 0.0
+    if evals[1] > 2 * max(evals[0], 1e-12):
+        yaw = math.atan2(evecs[1, 1], evecs[0, 1])
+        yaw = (yaw + math.pi / 2) % math.pi - math.pi / 2
+    if not (box[0] <= x <= box[1] and box[2] <= y <= box[3]):
+        return None
+    return float(x), float(y), float(yaw)
+
+
 def _excluded(x: float, y: float, exclude: Sequence[Sequence[float]]) -> bool:
     return any(abs(x - ex) < half and abs(y - ey) < half for ex, ey, half in exclude)
 
@@ -325,6 +390,7 @@ class CeilingBottleSource(TargetSource):
         frame_period_s: float = 0.12,
         min_iou: float = 0.6,
         host: str | None = None,
+        in_bin_rim_height: float = 0.384,
     ) -> None:
         if image_client is None:
             from prpl_tidybot.marker_detector.ceiling_image_client import (  # pylint: disable=import-outside-toplevel
@@ -350,6 +416,7 @@ class CeilingBottleSource(TargetSource):
         self._num_frames = int(num_frames)
         self._period = float(frame_period_s)
         self._min_iou = float(min_iou)
+        self._rim_height = float(in_bin_rim_height)
         self.last_fit: BottleFit | None = None
 
     def _frames(self) -> list[NDArray[np.uint8]]:
@@ -386,6 +453,15 @@ class CeilingBottleSource(TargetSource):
             )
         self.last_fit = fit
         return fit
+
+    def find_pose_in_box(
+        self, box: Sequence[float]
+    ) -> tuple[float, float, float] | None:
+        """The bottle's (x, y, yaw) inside the floor box ``box`` (the bin), or None (see
+        :func:`find_bottle_in_box`); the skill server looks here before the floor."""
+        return find_bottle_in_box(
+            self._frames()[-3:], self._cameras, self._model, box, self._rim_height
+        )
 
     def get_target(self) -> tuple[float, float, float]:
         fit = self.localize()

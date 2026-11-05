@@ -231,3 +231,46 @@ def test_alternates_are_the_other_cameras_estimates(cameras):
         1,
     )
     assert not source.alternates()
+
+
+# The far bin on 2026-11-05 at 11:10 (observe()'s fit), as `_bin_box` gives it.
+FAR_BIN = (0.24375, 1.3125, 0.0196, 0.365, 0.26)
+
+
+def _bin_box_of(x, y, yaw, length, width):
+    c, s = math.cos(yaw), math.sin(yaw)
+    hx = 0.5 * (abs(length * c) + abs(width * s))
+    hy = 0.5 * (abs(length * s) + abs(width * c))
+    return [x - hx, x + hx, y - hy, y + hy]
+
+
+@pytest.mark.parametrize(
+    ("name", "inside"), [("in", True), ("empty", False), ("live", True)]
+)
+def test_a_bottle_in_the_bin_is_found_by_its_dark_label(cameras, name, inside):
+    """2026-11-05 11:10: a toss landed in the blue bin and observe() said no bottle.
+    In the bin's shadow the label is near black (HSV value ~18, the floor search needs
+    60) and its walls hide most of it, so the floor fit cannot score it. The bin's
+    opening is searched for dark, saturated red instead. Frames from the ceiling
+    video (half resolution, upscaled), everything but the bin blacked out: the bottle
+    in the bin, and the same bin empty 31 s earlier; and a full-resolution live frame
+    with the bottle lying in the far bin (13:4x), which the floor search missed."""
+    path = Path(__file__).parent / "data" / f"bottle_in_far_bin_{name}_20261105.png"
+    source = CeilingBottleSource(
+        SERIALS,
+        image_client=_Images([cv.imread(str(path))]),
+        marker_client=_Markers(),
+        floor_bounds=BOUNDS,
+        num_frames=1,
+        frame_period_s=0.0,
+    )
+    found = source.find_pose_in_box(_bin_box_of(*FAR_BIN))
+    if not inside:
+        assert found is None
+        return
+    assert found is not None
+    x, y, _yaw = found
+    c, s = math.cos(-FAR_BIN[2]), math.sin(-FAR_BIN[2])
+    along = c * (x - FAR_BIN[0]) - s * (y - FAR_BIN[1])
+    across = s * (x - FAR_BIN[0]) + c * (y - FAR_BIN[1])
+    assert abs(along) < FAR_BIN[3] / 2 and abs(across) < FAR_BIN[4] / 2
