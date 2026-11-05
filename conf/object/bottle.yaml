@@ -45,6 +45,10 @@ pick:
 # frame, so every bottle found on the floor is resting.
 skill_server:
   upright_min_iou: 0.0
+  # The held bottle sticks out of the gripper and the ceiling cameras still find its
+  # label, projected onto the floor ~2 m away (2026-11-05: held at gripper 0.33,
+  # reported across the tape, so the planner saw no bottle in hand).
+  held_object_visible: true
 
 # mode=sim draws and rests the bottle lying (its radius off the floor).
 sim:

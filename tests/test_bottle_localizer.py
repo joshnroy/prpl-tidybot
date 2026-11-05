@@ -3,6 +3,7 @@ its red label (the clear plastic barely shows from the ceiling) and fitted as a
 label-sized cylinder, so its pose is the label's centre and the bottle's axis."""
 
 import math
+from pathlib import Path
 
 import cv2 as cv
 import numpy as np
@@ -112,6 +113,19 @@ def test_a_bottle_beside_the_blue_bin_on_the_carpet_is_found(cameras):
     fit = localize_bottle([frame], cameras, MODEL, BOUNDS, serials=SERIALS)
     assert fit is not None
     assert math.hypot(fit.x - pose[0], fit.y - pose[1]) < 0.015
+
+
+def test_dark_print_on_the_label_still_counts_as_label(cameras):
+    """2026-11-05, after a toss: the label's black panel and white stripe faced the
+    ceiling and reached its edge, so red-only pixels covered about two thirds of the
+    label and the fit scored 0.5985 against min_iou 0.6. A real frame (everything
+    but the bottle blacked out)."""
+    path = Path(__file__).parent / "data" / "bottle_dark_print_up_20261105.png"
+    frame = cv.imread(str(path))
+    fit = localize_bottle([frame], cameras, MODEL, BOUNDS, serials=SERIALS)
+    assert fit is not None
+    assert math.hypot(fit.x - 0.100, fit.y - (-0.466)) < 0.03
+    assert fit.iou >= 0.8
 
 
 def test_nothing_red_gives_none(cameras):

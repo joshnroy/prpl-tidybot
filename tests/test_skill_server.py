@@ -528,6 +528,29 @@ def test_a_closed_gripper_with_the_cube_on_the_floor_is_not_holding(skills):
     assert skills.pick()["refused"] is False
 
 
+def test_a_held_object_the_cameras_still_see_is_held():
+    """The bottle sticks out of the gripper, so the ceiling cameras still find its
+    label, projected onto the floor far from the hand (2026-11-05: held, gripper
+    0.33, reported across the tape). With ``skill_server.held_object_visible`` the
+    held reading alone says holding, and the look drops that detection."""
+    skills = build_skills(_cfg(**{"skill_server.held_object_visible": "true"}))
+    assert skills.pick()["held"]
+    obs = skills.observe()  # the fake cameras still see the cube on the floor
+    assert obs["holding"] is True and obs["cube"] is None
+    assert obs["can_pick"]["reason"] == "already holding the cube"
+    skills.open_gripper()
+    obs = skills.observe()
+    assert obs["holding"] is False and obs["cube"] is not None
+
+
+def test_the_bottle_counts_a_held_reading_as_held():
+    with initialize_config_dir(version_base=None, config_dir=str(_CONF_DIR)):
+        bottle = compose(config_name="skill_server", overrides=["+object=bottle"])
+    assert bottle.skill_server.held_object_visible is True
+    assert bottle.env.pipelines.real.perceiver.target_source.min_iou == 0.7
+    assert _cfg().skill_server.held_object_visible is False
+
+
 def test_open_gripper_clears_a_closed_empty_gripper(skills, monkeypatch):
     """Closed on nothing the cameras can see (the cube gone): open_gripper leaves the
     gripper open and commanded open, and nothing is held any more."""
