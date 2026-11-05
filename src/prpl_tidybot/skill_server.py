@@ -923,6 +923,11 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
             )
             closed = self.arm.get_gripper_state() >= _CLOSED
             self.gripper_command = 1.0 if closed else 0.0
+            if not closed:
+                # The withdraw leaves the arm stretched over the bin, hiding it from
+                # the ceiling cameras for the look that follows (2026-11-05 14:46).
+                _retract(self.cfg, self.arm, self.stop_event)
+                record["stages"].append({"stage": "retract"})
             return reply | {
                 "dumped": failure is None,
                 "note": failure,

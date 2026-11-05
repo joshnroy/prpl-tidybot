@@ -385,7 +385,9 @@ class CeilingBottleSource(TargetSource):
         length: float = 0.20,
         diameter: float = 0.066,
         label_length: float = 0.10,
-        robot_exclusion_half: float = 0.45,
+        # Half the base's diagonal (0.548 x 0.508 m: 0.374) plus 2.6 cm, so the
+        # footprint is covered at any heading.
+        robot_exclusion_half: float = 0.40,
         num_frames: int = 10,
         frame_period_s: float = 0.12,
         min_iou: float = 0.6,
@@ -433,6 +435,11 @@ class CeilingBottleSource(TargetSource):
         return frames
 
     def _exclusions(self) -> list[tuple[float, float, float]]:
+        # The detector answers each request with the pose current when the request
+        # arrived, and the client requests at the end of every call, so the first
+        # answer after a drive is from before it (2026-11-05: 0.44 m stale, which hid
+        # a bottle behind the robot). The second answer is to a request made now.
+        self._markers.get_latest()
         poses = self._markers.get_latest().get("poses") or {}
         return [(float(p[0]), float(p[1]), self._robot_half) for p in poses.values()]
 

@@ -1182,12 +1182,26 @@ def test_dump_bin_runs_every_stage_and_puts_the_bin_back(skills):
         "lower",
         "open",
         "withdraw",
+        "retract",
     ]
     robot = skills.observe()["robot"]
     assert robot[:2] == pytest.approx(reply["stand"][:2], abs=0.02)
     turn = (robot[2] - reply["stand"][2] + math.pi) % (2 * math.pi) - math.pi
     assert abs(turn) < 0.02
     assert skills.gripper_command == 0.0
+
+
+def test_a_dump_ends_with_the_arm_folded_so_the_cameras_see_the_bin(skills):
+    """2026-11-05 14:46: the look right after a dump found no bin. The withdraw had
+    left the arm stretched over it (the gripper 12 cm above the rim), hiding it from
+    the ceiling cameras. A dump that let go folds the arm to its retract pose."""
+    _bin_near(skills)
+    reply = skills.dump_bin()
+    assert reply["dumped"], reply
+    assert reply["stages"][-1]["stage"] == "retract"
+    assert list(skills.arm.get_arm_state()) == pytest.approx(
+        list(RETRACT_ARM_CONF), abs=0.06
+    )
 
 
 def test_dump_bin_refuses_a_bin_across_the_barrier(skills):
@@ -1211,13 +1225,13 @@ def test_dump_bin_without_a_bin_refuses(skills):
 
 def test_a_missed_rim_grasp_lets_go_and_withdraws(skills):
     """Closed on nothing (the reading at the fully closed end): open, back off and
-    report it, never lifting."""
+    report it, never lifting; then fold the arm, as after any dump that let go."""
     _bin_near(skills)
     skills._read = lambda r: 1.0  # pylint: disable=protected-access
     reply = skills.dump_bin()
     assert not reply["dumped"]
     assert "rim" in reply["note"]
-    assert [s["stage"] for s in reply["stages"]][-1] == "withdraw"
+    assert [s["stage"] for s in reply["stages"]][-2:] == ["withdraw", "retract"]
     assert "lift" not in [s["stage"] for s in reply["stages"]]
     assert skills.gripper_command == 0.0
 
