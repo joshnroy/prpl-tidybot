@@ -67,6 +67,10 @@ class TopDownPickGeometry:
     # (inside the bin, the fingers then spread along the other wall), the wrist still
     # turning at most 90 degrees.
     closing_turn: float = 0.0
+    # Added after every fold, so pi turns the hand half a turn onto the same grasp:
+    # a bottle (the same every 180 degrees to the ceiling cameras) is then held the
+    # other way round (``pick.top_down.orient_bottle_neck``).
+    yaw_turn: float = 0.0
     # Pinch point beyond the arm's flange (the arm server's IK uses 0.12).
     ee_offset: float = 0.12
     # Gripper readings: closing on nothing reaches ~1.0; on the 5 cm cube it read 0.49.
@@ -184,10 +188,12 @@ def cube_closing_yaw(cube_yaw_rel: float, geom: TopDownPickGeometry) -> float:
     yaw = cube_yaw_rel + geom.wrist_yaw_offset
     half = geom.symmetry / 2
     folded = (yaw + half) % geom.symmetry - half
-    if not geom.closing_turn:
-        return folded
-    # The two fingers are symmetric too: keep the turned grasp within 90 degrees.
-    return (folded + geom.closing_turn + math.pi / 2) % math.pi - math.pi / 2
+    if geom.closing_turn:
+        # The two fingers are symmetric too: keep the turned grasp within 90 degrees.
+        folded = (folded + geom.closing_turn + math.pi / 2) % math.pi - math.pi / 2
+    if geom.yaw_turn:
+        return folded + geom.yaw_turn
+    return folded
 
 
 _SOLVERS: dict[float, IKSolver] = {}
@@ -338,6 +344,20 @@ def pointing_down_joints(
                 if np.linalg.norm(pos - goal) < 0.005 and approach @ want > 0.9994:
                     return [float(v) for v in q]
     raise ValueError(f"IK did not reach {goal.round(3).tolist()} pointing down.")
+
+
+def half_turn_sign(joints: Sequence[float]) -> float:
+    """The way to turn the wrist half a turn from `joints`: back toward 0, so the
+    turned wrist stays within +-pi."""
+    return -1.0 if joints[6] > 0 else 1.0
+
+
+def half_turn(joints: Sequence[float], sign: float) -> list[float]:
+    """`joints` with the wrist (joint 7) turned by `sign` * pi: the tool points down
+    along joint 7's axis through the pinch point, so this is the same pinch point with
+    the hand turned half a turn about it (``yaw_turn`` pi), without an IK solve whose
+    redundancy could move the other six joints."""
+    return [float(v) for v in joints[:6]] + [float(joints[6]) + sign * math.pi]
 
 
 def grasp_succeeded(gripper_position: float, geom: TopDownPickGeometry) -> bool:

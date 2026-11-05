@@ -34,6 +34,7 @@ from prpl_tidybot.bin_pour import (
     plan_bin_pour,
     pour_point,
 )
+from prpl_tidybot.bottle_neck import EndLook, top_end
 from prpl_tidybot.gripper_shape import (
     FINGER_LINKS,
     GRIPPER_HOUSING,
@@ -55,6 +56,8 @@ from prpl_tidybot.top_down_pick import (
     geometry_from_config,
     grasp_search_bounds,
     grasp_succeeded,
+    half_turn,
+    half_turn_sign,
     pointing_down_joints,
     standoff_pose,
     top_down_joint_targets,
@@ -69,6 +72,11 @@ from prpl_tidybot.visual_servo.top_down_cube import (
 _logger = logging.getLogger(__name__)
 
 _MAX_DRIVE_TICKS = 600
+# The bottle's end held toward the top of the wrist frame (pick.top_down.
+# orient_bottle_neck): the neck, as in 15 of the 25 picks of 2026-11-05 (8/12 of
+# Josh's labelled holds), so most of the throws the toss parameters were fitted on
+# keep their grip.
+BOTTLE_END_UP = "neck"
 # Slack (m) on the wall checks' shortcuts (a link's bounding sphere, a point inside the
 # outer footprint), for float rounding: a shortcut only ever gives the full check's
 # answer.
@@ -1555,6 +1563,7 @@ def _grasp_at(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     bin_fit: BinFit | None = None,
     in_bin: Any = None,
     obstacle: BinFit | None = None,
+    neck: "_NeckCheck | None" = None,
 ) -> tuple[bool, str | None]:
     """One grasp from where the base parked at `cube`: (held, stop reason or None).
 
@@ -1564,7 +1573,8 @@ def _grasp_at(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     inside the bin: the arm goes through the waypoint above the rim, and no arm pose
     touching a wall is commanded. With ``obstacle`` (the localized bin, the cube on
     the floor) no arm pose touching its walls is commanded either: the grasp on the
-    faces that clears them, or none."""
+    faces that clears them, or none. With ``neck`` (a bottle) the hand is turned half
+    a turn at the hover if the wrist frame shows the wrong end toward its top."""
     td = cfg.pick.top_down
     ax, ay = arm_frame_target(base, (cube["x"], cube["y"]), geom)
     yaw_rel = math.radians(cube["yaw_deg"]) - base[2]
@@ -1647,6 +1657,9 @@ def _grasp_at(  # pylint: disable=too-many-arguments,too-many-positional-argumen
         else _CompliantMover(arm, td, geom, moves, cfg.arm_home)
     )
     mover.stop = stop
+    neck_log: dict[str, Any] | None = None
+    if neck is not None:
+        neck_log = record["pick_attempts"][-1].setdefault("bottle_neck", {})
     held, reading, note, servo_log = _grasp(
         mover,
         geom,
@@ -1656,6 +1669,8 @@ def _grasp_at(  # pylint: disable=too-many-arguments,too-many-positional-argumen
         clip,
         above,
         clear,
+        neck,
+        neck_log,
     )
     if servo_log is not None:
         record["pick_attempts"][-1]["lateral_servo"] = servo_log
@@ -1697,9 +1712,17 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
     name: str,
     above: list[float] | None = None,
     clear: Callable[[Sequence[float]], str | None] | None = None,
+    neck: "_NeckCheck | None" = None,
+    neck_log: dict[str, Any] | None = None,
 ) -> tuple[bool, float, str | None, dict[str, Any] | None]:
-    """Jimmy Wu's pick_object sequence: open, hover, (align with the wrist camera),
-    descend, close, read; then lift and carry, or open and back off.
+    """Jimmy Wu's pick_object sequence: open, hover, (turn the hand to the bottle's
+    neck), (align with the wrist camera), descend, close, read; then lift and carry,
+    or open and back off.
+
+    With ``neck`` the wrist frame at the hover says which end of the bottle is toward
+    its top; if it is not ``BOTTLE_END_UP`` the wrist turns half a turn there (the
+    same grasp, the hand the other way round) and the descent, lift and any servo
+    step follow the turned hand. What it saw goes in ``neck_log``.
 
     With ``above`` (a cube inside the bin) the arm enters and leaves through that
     waypoint over the rim. ``clear`` (why a pose would touch the bin, or None; any
@@ -1730,6 +1753,24 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
         if not mover.move("hover", hover):
             retreat(hover)
             return False, mover.arm.get_gripper_state(), "hover did not arrive", None
+        if neck is not None:
+            look = neck.look()
+            turn = look.end is not None and look.end != BOTTLE_END_UP
+            if neck_log is not None:
+                neck_log.update(dataclasses.asdict(look) | {"turned": turn})
+            _logger.info("Bottle at the hover: %s toward the frame's top.", look)
+            if turn:
+                sign = half_turn_sign(hover)
+                hover, grasp = half_turn(hover, sign), half_turn(grasp, sign)
+                geom = dataclasses.replace(geom, yaw_turn=math.pi)
+                if not mover.move("neck_turn", hover):
+                    retreat(hover)
+                    return (
+                        False,
+                        mover.arm.get_gripper_state(),
+                        "neck turn did not arrive",
+                        None,
+                    )
         if servo is not None:
 
             def move_hover(label: str, x: float, y: float, w: float) -> bool:
@@ -1861,6 +1902,30 @@ def _build_lateral_servo(
         LateralServoParams(**kwargs),
         None if log_dir is None else log_dir / "lateral_servo",
     )
+
+
+class _NeckCheck:
+    """The bottle-end check at the hover: one settled wrist frame, read by
+    :func:`prpl_tidybot.bottle_neck.top_end`."""
+
+    def __init__(self, source: ImageSource, settle_s: float) -> None:
+        self._images = _SettledImages(source, settle_s)
+
+    def look(self) -> EndLook:
+        """Which end of the bottle is toward the top of the wrist frame now."""
+        image = self._images.get_image()
+        if image is None:
+            return EndLook(None, note="no wrist frame")
+        return top_end(image)
+
+
+def build_neck_check(cfg: DictConfig, source: ImageSource | None) -> _NeckCheck | None:
+    """The bottle-end check when ``pick.top_down.orient_bottle_neck`` is on and there
+    is a wrist camera, else None (the pick is then the plain one)."""
+    td = cfg.pick.top_down
+    if source is None or not bool(td.get("orient_bottle_neck", False)):
+        return None
+    return _NeckCheck(source, float(td.get("orient_bottle_neck_settle_s", 0.3)))
 
 
 class _SettledImages:

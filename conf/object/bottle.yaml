@@ -26,6 +26,12 @@ pick:
     arm_controller: angular
     symmetry_deg: 180.0
     wrist_yaw_offset_deg: 0.0
+    # Which way round the bottle is held is otherwise a coin toss (that fold is the
+    # 180-degree symmetry above): at the hover one wrist frame says which end is toward
+    # its top, and the wrist turns half a turn there unless it is the neck
+    # (robot_skills.BOTTLE_END_UP, prpl_tidybot.bottle_neck). 2026-11-05: 8/12 held
+    # neck-up, 4/12 base-up, and throws with identical parameters landed 1.2 m apart.
+    orient_bottle_neck: true
     # The wrist servo finds the blue foam cube (OpenCV hue 95-130): it does not see
     # the red bottle, and it does see the blue bin (hue ~127).
     lateral_servo:

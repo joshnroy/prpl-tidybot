@@ -942,6 +942,100 @@ def test_each_pick_films_the_wrist_and_the_session_films_the_ceiling(tmp_path):
     assert video.isOpened() and video.get(cv.CAP_PROP_FRAME_COUNT) > 0
 
 
+class _HoverCamera:
+    """A wrist camera that always shows one real 2026-11-05 hover frame (RGB), counting
+    its reads."""
+
+    def __init__(self, end):
+        import cv2 as cv  # pylint: disable=import-outside-toplevel
+
+        data = Path(__file__).parent / "data" / "bottle_neck_hover"
+        path = sorted(data.glob(f"*_{end}.jpg"))[0]
+        self.frame = cv.resize(
+            cv.cvtColor(cv.imread(str(path)), cv.COLOR_BGR2RGB), (640, 480)
+        )
+        self.reads = 0
+
+    def get_image(self):
+        """The hover frame."""
+        self.reads += 1
+        return self.frame
+
+
+def _bottle_pick(end, **extra):
+    camera = _HoverCamera(end)
+    cfg = _cfg(
+        **{"+object": "bottle", "pick.top_down.lateral_servo.enabled": "false"},
+        **extra,
+    )
+    skills = build_skills(cfg, wrist_camera=lambda arm: camera)
+    reply = skills.pick()
+    skills.close()
+    assert reply["held"] is True, reply["note"]
+    return reply["attempts"][-1], camera
+
+
+def test_the_bottle_config_orients_the_neck_and_the_cubes_does_not():
+    """``pick.top_down.orient_bottle_neck``: on for +object=bottle, off otherwise."""
+    assert _cfg(**{"+object": "bottle"}).pick.top_down.orient_bottle_neck is True
+    assert not _cfg().pick.top_down.get("orient_bottle_neck", False)
+
+
+def test_a_bottle_seen_base_up_at_the_hover_is_picked_with_the_hand_turned():
+    """The base toward the top of the wrist frame at the hover: the wrist turns half
+    a turn there, before the descent, so the bottle is held neck toward the top of
+    the frame like every other bottle pick; the grasp is below the turned hover."""
+    attempt, camera = _bottle_pick("base")
+    assert camera.reads >= 1
+    names = [m["name"] for m in attempt["moves"]]
+    assert names[:3] == ["hover", "neck_turn", "grasp"], names
+    hover, turn, grasp = (np.radians(m["planned_deg"]) for m in attempt["moves"][:3])
+    assert abs(_wrap(turn[6] - hover[6])) == pytest.approx(math.pi, abs=0.02)
+    assert np.abs(_wrap(turn[:6] - hover[:6])).max() < 0.02
+    assert abs(_wrap(grasp[6] - turn[6])) < 0.05
+    neck = attempt["bottle_neck"]
+    assert neck["end"] == "base" and neck["turned"] is True
+    json.dumps(attempt)
+
+
+def test_a_bottle_seen_neck_up_at_the_hover_is_picked_as_planned():
+    """The neck already toward the top of the frame: no turn."""
+    attempt, _ = _bottle_pick("neck")
+    names = [m["name"] for m in attempt["moves"]]
+    assert "neck_turn" not in names and names[:2] == ["hover", "grasp"]
+    neck = attempt["bottle_neck"]
+    assert neck["end"] == "neck" and neck["turned"] is False
+
+
+def test_with_the_neck_check_off_a_bottle_pick_never_looks():
+    """``orient_bottle_neck: false``: the bottle pick is the plain one."""
+    attempt, camera = _bottle_pick(
+        "base", **{"pick.top_down.orient_bottle_neck": "false"}
+    )
+    assert camera.reads == 0 and "bottle_neck" not in attempt
+    assert "neck_turn" not in [m["name"] for m in attempt["moves"]]
+
+
+def test_a_cube_pick_never_looks_for_a_neck():
+    """The cube pick is unchanged: the wrist frame is not read for it and the
+    attempt's moves are the same as with no wrist camera at all."""
+    camera = _HoverCamera("base")
+    extra = {"pick.top_down.lateral_servo.enabled": "false"}
+    with_camera = build_skills(_cfg(**extra), wrist_camera=lambda arm: camera)
+    plain = build_skills(_cfg(**extra))
+    replies = [with_camera.pick(), plain.pick()]
+    with_camera.close()
+    plain.close()
+    assert camera.reads == 0
+    moves = [r["attempts"][-1]["moves"] for r in replies]
+    assert moves[0] == moves[1]
+    assert "bottle_neck" not in replies[0]["attempts"][-1]
+
+
+def _wrap(a):
+    return (np.asarray(a) + math.pi) % (2 * math.pi) - math.pi
+
+
 # ------------------------------------------------------------------ fake robot
 
 
