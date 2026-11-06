@@ -68,6 +68,7 @@ from prpl_tidybot.visual_servo.top_down_cube import (
     TopDownLateralServo,
     TopDownServoResult,
 )
+from prpl_tidybot.wrist_hold import HoldCheck, HoldLook
 
 _logger = logging.getLogger(__name__)
 
@@ -1564,6 +1565,7 @@ def _grasp_at(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     in_bin: Any = None,
     obstacle: BinFit | None = None,
     neck: "_NeckCheck | None" = None,
+    hold: HoldCheck | None = None,
 ) -> tuple[bool, str | None]:
     """One grasp from where the base parked at `cube`: (held, stop reason or None).
 
@@ -1574,7 +1576,10 @@ def _grasp_at(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     touching a wall is commanded. With ``obstacle`` (the localized bin, the cube on
     the floor) no arm pose touching its walls is commanded either: the grasp on the
     faces that clears them, or none. With ``neck`` (a bottle) the hand is turned half
-    a turn at the hover if the wrist frame shows the wrong end toward its top."""
+    a turn at the hover if the wrist frame shows the wrong end toward its top. With
+    ``hold`` (a bottle) a wrist frame at the end of the carry must show it in the hand
+    too, or the attempt is a miss with the gripper opened; its look is the attempt's
+    ``wrist_hold``."""
     td = cfg.pick.top_down
     ax, ay = arm_frame_target(base, (cube["x"], cube["y"]), geom)
     yaw_rel = math.radians(cube["yaw_deg"]) - base[2]
@@ -1660,6 +1665,7 @@ def _grasp_at(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     neck_log: dict[str, Any] | None = None
     if neck is not None:
         neck_log = record["pick_attempts"][-1].setdefault("bottle_neck", {})
+    hold_log: dict[str, Any] = {}
     held, reading, note, servo_log = _grasp(
         mover,
         geom,
@@ -1671,18 +1677,23 @@ def _grasp_at(  # pylint: disable=too-many-arguments,too-many-positional-argumen
         clear,
         neck,
         neck_log,
+        hold,
+        hold_log,
     )
+    if hold_log:
+        record["pick_attempts"][-1]["wrist_hold"] = hold_log
     if servo_log is not None:
         record["pick_attempts"][-1]["lateral_servo"] = servo_log
     record["pick_attempts"][-1].update({"gripper": reading, "held": held})
     if note is not None:
         record["pick_attempts"][-1]["note"] = note
     _logger.info(
-        "Pick attempt %d: gripper %.3f -> %s%s.",
+        "Pick attempt %d: gripper %.3f -> %s%s%s.",
         attempt,
         reading,
         "held" if held else "missed",
         f" ({note})" if note else "",
+        _hold_summary(hold_log),
     )
     if not held:
         wrist.stop()
@@ -1714,6 +1725,8 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
     clear: Callable[[Sequence[float]], str | None] | None = None,
     neck: "_NeckCheck | None" = None,
     neck_log: dict[str, Any] | None = None,
+    hold: HoldCheck | None = None,
+    hold_log: dict[str, Any] | None = None,
 ) -> tuple[bool, float, str | None, dict[str, Any] | None]:
     """Jimmy Wu's pick_object sequence: open, hover, (turn the hand to the bottle's
     neck), (align with the wrist camera), descend, close, read; then lift and carry,
@@ -1729,8 +1742,14 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
     pick with a bin localized) refuses any servo step, re-planned hover (the lift and
     the retreat) or grasp that would.
 
+    With ``hold`` the wrist frame at the end of the carry says whether the bottle is
+    still in the hand (the gripper reading cannot: it stays where the fingers stopped
+    when the bottle slips out). Not held, the gripper opens there and the attempt is a
+    miss; no verdict (no frame, a camera error), the gripper's verdict stands. What it
+    saw goes in ``hold_log``.
+
     Returns (held, gripper reading, note, servo log); the note says why the gripper was
-    not closed, if it was not.
+    not closed, if it was not, or that the wrist saw the hand empty.
     """
     td = mover.td
     ax, ay, yaw = start
@@ -1834,6 +1853,18 @@ def _grasp(  # pylint: disable=too-many-arguments,too-many-positional-arguments,
             if above is not None:
                 mover.move("above", above)
             mover.move("carry", list(CARRY_ARM_CONF))
+            if hold is not None:
+                hold_look = _look_for_hold(hold, hold_log)
+                if hold_look.held is False:
+                    mover.gripper(0.0)
+                    return (
+                        False,
+                        reading,
+                        "the wrist camera sees no bottle in the hand after the carry "
+                        f"(score {hold_look.score:.3f} < {hold_look.threshold:.2f}); "
+                        "gripper opened",
+                        servo_log,
+                    )
         else:
             mover.gripper(0.0)
             retreat(hover)
@@ -1926,6 +1957,51 @@ def build_neck_check(cfg: DictConfig, source: ImageSource | None) -> _NeckCheck 
     if source is None or not bool(td.get("orient_bottle_neck", False)):
         return None
     return _NeckCheck(source, float(td.get("orient_bottle_neck_settle_s", 0.3)))
+
+
+def build_hold_check(cfg: DictConfig, source: ImageSource | None) -> HoldCheck | None:
+    """The end-of-carry hold check when ``pick.top_down.wrist_hold_check.enabled`` is
+    on and there is a wrist camera, else None (the gripper reading alone decides)."""
+    check = cfg.pick.top_down.get("wrist_hold_check")
+    if source is None or check is None or not bool(check.get("enabled", False)):
+        return None
+    return HoldCheck(
+        source,
+        settle_s=float(check.get("settle_s", 0.3)),
+        threshold=float(check.get("threshold", 0.15)),
+    )
+
+
+def _look_for_hold(hold: HoldCheck, log: dict[str, Any] | None) -> HoldLook:
+    """One end-of-carry look, logged; with no verdict the gripper's stands, and the
+    record says so."""
+    look = hold.look()
+    entry = look.as_dict()
+    if look.held is None:
+        entry["note"] = f"{look.note}: kept the gripper's verdict (held)"
+        _logger.warning("Wrist hold check: %s.", entry["note"])
+    else:
+        _logger.info(
+            "Wrist hold check: score %.3f against %.2f -> %s.",
+            look.score,
+            look.threshold,
+            "bottle in the hand" if look.held else "no bottle in the hand",
+        )
+    if log is not None:
+        log.update(entry)
+    return look
+
+
+def _hold_summary(log: dict[str, Any]) -> str:
+    """The wrist check's part of the attempt's log line."""
+    if not log:
+        return ""
+    if log.get("held") is None:
+        return f"; wrist: no verdict ({log.get('note')})"
+    return (
+        f"; wrist: {'held' if log['held'] else 'not held'}, "
+        f"score {log['score']:.3f} vs {log['threshold']:.2f}"
+    )
 
 
 class _SettledImages:

@@ -963,9 +963,15 @@ class _HoverCamera:
 
 
 def _bottle_pick(end, **extra):
+    """A bottle pick whose wrist camera only ever shows the hover frame; the hold
+    check at the end of the carry (tested below) is off."""
     camera = _HoverCamera(end)
     cfg = _cfg(
-        **{"+object": "bottle", "pick.top_down.lateral_servo.enabled": "false"},
+        **{
+            "+object": "bottle",
+            "pick.top_down.lateral_servo.enabled": "false",
+            "pick.top_down.wrist_hold_check.enabled": "false",
+        },
         **extra,
     )
     skills = build_skills(cfg, wrist_camera=lambda arm: camera)
@@ -1030,6 +1036,138 @@ def test_a_cube_pick_never_looks_for_a_neck():
     moves = [r["attempts"][-1]["moves"] for r in replies]
     assert moves[0] == moves[1]
     assert "bottle_neck" not in replies[0]["attempts"][-1]
+    assert "wrist_hold" not in replies[0]["attempts"][-1]
+
+
+# ------------------------------------------- the bottle in the hand after the carry
+
+
+class _PickCamera:
+    """A wrist camera that shows, read by read, the given frames: the hover frame
+    (for the neck look) and real end-of-carry frames from tests/data/wrist_hold by
+    name; an exception instance is raised instead, None is no frame."""
+
+    def __init__(self, *frames):
+        import cv2 as cv  # pylint: disable=import-outside-toplevel
+
+        data = Path(__file__).parent / "data" / "wrist_hold"
+        self.frames = []
+        for f in frames:
+            if f == "hover":
+                f = _HoverCamera("neck").frame
+            elif isinstance(f, str):
+                path = next(data.glob(f"*_{f}.jpg"))
+                f = cv.resize(
+                    cv.cvtColor(cv.imread(str(path)), cv.COLOR_BGR2RGB), (640, 480)
+                )
+            self.frames.append(f)
+        self.reads = 0
+
+    def get_image(self):
+        """The next frame (the last one again once they run out)."""
+        frame = self.frames[min(self.reads, len(self.frames) - 1)]
+        self.reads += 1
+        if isinstance(frame, Exception):
+            raise frame
+        return frame
+
+
+def _bottle_skills(camera, **extra):
+    cfg = _cfg(
+        **{
+            "+object": "bottle",
+            "pick.top_down.lateral_servo.enabled": "false",
+            "pick.top_down.wrist_hold_check.settle_s": 0,
+        },
+        **extra,
+    )
+    return build_skills(cfg, wrist_camera=lambda arm: camera)
+
+
+def test_the_bottle_config_checks_the_hold_with_the_wrist_and_the_cubes_does_not():
+    """``pick.top_down.wrist_hold_check``: on for +object=bottle, off otherwise."""
+    check = _cfg(**{"+object": "bottle"}).pick.top_down.wrist_hold_check
+    assert check.enabled is True and 0.0 < check.threshold < 1.0
+    assert not _cfg().pick.top_down.get("wrist_hold_check", {}).get("enabled", False)
+
+
+def test_a_bottle_the_wrist_sees_in_the_hand_is_held():
+    """Gripper in band and the bottle between the fingers at the end of the carry."""
+    camera = _PickCamera("hover", "pick_034_held")
+    skills = _bottle_skills(camera)
+    reply = skills.pick()
+    skills.close()
+    assert reply["held"] is True, reply["note"]
+    hold = reply["attempts"][-1]["wrist_hold"]
+    assert hold["held"] is True and hold["score"] >= hold["threshold"]
+    assert reply["wrist_hold"] == hold
+    assert skills.gripper_command == 1.0
+    json.dumps(reply)
+
+
+def test_a_bottle_that_slipped_out_is_missed_with_the_gripper_opened():
+    """2026-11-06 pick 20: the gripper read 0.262 (in band) and the bottle fell out
+    during the carry. The wrist frame at the end of the carry shows the floor: the
+    attempt is a miss, the gripper is opened (so observe() reads not holding and uses
+    the ceiling cameras' detection again), and the score is in the reply."""
+    camera = _PickCamera("hover", "pick_020_slip")
+    skills = _bottle_skills(camera)
+    reply = skills.pick(max_attempts=1)
+    assert reply["held"] is False and reply["refused"] is False
+    attempt = reply["attempts"][-1]
+    assert attempt["held"] is False and attempt["gripper"] == pytest.approx(0.49)
+    hold = attempt["wrist_hold"]
+    assert hold["held"] is False and hold["score"] < hold["threshold"]
+    assert reply["wrist_hold"] == hold
+    assert "wrist" in reply["note"] and "wrist" in attempt["note"]
+    assert skills.arm.get_gripper_state() == pytest.approx(0.0, abs=0.01)
+    assert skills.gripper_command == 0.0
+    obs = skills.observe()
+    skills.close()
+    assert obs["holding"] is False and obs["cube"] is not None
+    json.dumps(reply)
+
+
+def test_a_slip_goes_down_the_pick_retry_path(monkeypatch):
+    """Not held per the wrist: retreat, re-localize and try again (not the other
+    camera's estimate of where the bottle was: it has fallen since)."""
+    monkeypatch.setattr(
+        ConstantTargetSource, "alternates", lambda _self: [(0.62, -0.5, 0.0)]
+    )
+    camera = _PickCamera("hover", "pick_020_slip", "hover", "pick_008_held")
+    skills = _bottle_skills(camera)
+    reply = skills.pick()
+    skills.close()
+    assert reply["held"] is True, reply["note"]
+    first, second = reply["attempts"]
+    assert [first["attempt"], second["attempt"]] == [1, 2]
+    assert first["held"] is False and first["wrist_hold"]["held"] is False
+    assert first["target"] == "best camera" and "retreated_to" in first
+    assert second["held"] is True and second["wrist_hold"]["held"] is True
+
+
+def test_an_unreadable_wrist_frame_falls_back_to_the_gripper():
+    """The check cannot crash the pick: no frame, or a camera that raises, leaves the
+    gripper's verdict, and the attempt record says so."""
+    for broken in (RuntimeError("wrist camera gone"), None):
+        skills = _bottle_skills(_PickCamera("hover", broken))
+        reply = skills.pick()
+        skills.close()
+        assert reply["held"] is True, reply["note"]
+        hold = reply["attempts"][-1]["wrist_hold"]
+        assert hold["held"] is None and "gripper" in hold["note"], hold
+
+
+def test_with_the_hold_check_off_the_bottle_pick_reads_no_frame_after_the_carry():
+    """``wrist_hold_check.enabled: false``: only the neck look reads the camera."""
+    camera = _PickCamera("hover", "pick_020_slip")
+    skills = _bottle_skills(
+        camera, **{"pick.top_down.wrist_hold_check.enabled": "false"}
+    )
+    reply = skills.pick()
+    skills.close()
+    assert reply["held"] is True and camera.reads == 1
+    assert "wrist_hold" not in reply["attempts"][-1]
 
 
 def _wrap(a):
