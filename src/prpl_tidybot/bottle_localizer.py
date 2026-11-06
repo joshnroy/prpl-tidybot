@@ -199,15 +199,84 @@ def _excluded(x: float, y: float, exclude: Sequence[Sequence[float]]) -> bool:
     return any(abs(x - ex) < half and abs(y - ey) < half for ex, ey, half in exclude)
 
 
+@dataclass(frozen=True)
+class RobotBox:
+    """The robot's base as the ceiling cameras see it (m): its footprint, centred on
+    the marker pose and turned with its heading, from the floor up to its top.
+
+    The TidyBot++ base is 0.548 m along its heading and 0.508 m across
+    (``aimed_toss.BASE_LENGTH`` / ``BASE_WIDTH``); its top, where the markers sit, is
+    0.378 m up (``marker_detector.constants.ROBOT_HEIGHT``). Red cabling runs on it up
+    to the top, and a camera looking down at an angle sees it up to 0.25 m beyond the
+    footprint (2026-11-06), so a blob is the robot's when the camera's ray to it
+    passes through this box, not when its floor point lies in the footprint.
+    """
+
+    length: float = 0.548
+    width: float = 0.508
+    height: float = 0.378
+    margin: float = 0.03
+
+
+def _camera_centre(camera: CeilingCamera) -> NDArray[np.float64]:
+    rot: Any = cv.Rodrigues(camera.rvec)[0]
+    return np.asarray(-rot.T @ camera.tvec, np.float64).reshape(3)
+
+
+def _behind_robot(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    camera: CeilingCamera,
+    x: float,
+    y: float,
+    z: float,
+    robots: Sequence[Sequence[float]],
+    box: RobotBox,
+) -> bool:
+    """Whether the camera's ray to the map point (x, y, z) passes through the base of
+    a robot at any of ``robots`` (map x, y, heading): the point is the robot's own,
+    or hidden by it."""
+    centre = _camera_centre(camera)
+    half_l, half_w = box.length / 2 + box.margin, box.width / 2 + box.margin
+    # The ray's floor-plane point at heights 0 and box.height (it is a straight line).
+    ends = [
+        centre[:2] + (np.array([x, y]) - centre[:2]) * (centre[2] - h) / (centre[2] - z)
+        for h in (0.0, box.height)
+    ]
+    for rx, ry, heading in robots:
+        c, s = math.cos(heading), math.sin(heading)
+        a, b = (
+            np.array(
+                [c * (p[0] - rx) + s * (p[1] - ry), -s * (p[0] - rx) + c * (p[1] - ry)]
+            )
+            for p in ends
+        )
+        # Clip the segment a -> b to the rectangle (Liang-Barsky).
+        lo, hi = 0.0, 1.0
+        for k, half in ((0, half_l), (1, half_w)):
+            d = b[k] - a[k]
+            for num, den in ((half - a[k], d), (half + a[k], -d)):
+                if den == 0:
+                    if num < 0:
+                        lo, hi = 1.0, 0.0
+                elif den > 0:
+                    hi = min(hi, num / den)
+                else:
+                    lo = max(lo, num / den)
+        if lo <= hi:
+            return True
+    return False
+
+
 def find_bottle_candidates(
     frame: NDArray[np.uint8],
     cameras: Sequence[CeilingCamera],
     floor_bounds: Sequence[float],
     model: BottleModel,
     exclude: Sequence[Sequence[float]] = (),
+    robots: Sequence[Sequence[float]] = (),
+    robot_box: RobotBox = RobotBox(),
 ) -> list[tuple[float, float]]:
     """Map-frame (x, y) of every label-coloured, label-sized blob in ``floor_bounds``,
-    largest first."""
+    largest first; none the robots' bases (``robots``: map x, y, heading) hide."""
     found: list[tuple[float, float, float]] = []
     for i, (cam, img) in enumerate(zip(cameras, _split(frame, len(cameras)))):
         rows, cols = img.shape[:2]
@@ -221,6 +290,8 @@ def find_bottle_candidates(
                 floor_bounds[0] <= x <= floor_bounds[1]
                 and floor_bounds[2] <= y <= floor_bounds[3]
             ) or _excluded(x, y, exclude):
+                continue
+            if _behind_robot(cam, x, y, model.diameter / 2, robots, robot_box):
                 continue
             expected = [
                 cv.contourArea(
@@ -311,6 +382,8 @@ def localize_bottle(  # pylint: disable=too-many-arguments,too-many-positional-a
     exclude: Sequence[Sequence[float]] = (),
     min_iou: float = 0.6,
     serials: Sequence[str] | None = None,
+    robots: Sequence[Sequence[float]] = (),
+    robot_box: RobotBox = RobotBox(),
 ) -> BottleFit | None:
     """The best-fitting bottle label in ``floor_bounds``, or None if nothing fits well
     enough.
@@ -318,10 +391,12 @@ def localize_bottle(  # pylint: disable=too-many-arguments,too-many-positional-a
     Each camera is fitted on its own (their calibrations disagree by a few cm where
     they overlap) and, as for the bin, a near tie goes to a camera whose calibrated
     region holds the label, then to the camera that sees it more directly from above.
+    ``exclude`` holds map-frame squares (x, y, half side); ``robots`` the poses (x, y,
+    heading) of robots whose base (``robot_box``) hides what is behind it.
     """
     best: BottleFit | None = None
     for guess in find_bottle_candidates(
-        frames[-1], cameras, floor_bounds, model, exclude
+        frames[-1], cameras, floor_bounds, model, exclude, robots, robot_box
     ):
         singles = [
             (i, fit)
@@ -349,6 +424,10 @@ def localize_bottle(  # pylint: disable=too-many-arguments,too-many-positional-a
             floor_bounds[0] <= chosen.x <= floor_bounds[1]
             and floor_bounds[2] <= chosen.y <= floor_bounds[3]
         ) or _excluded(chosen.x, chosen.y, exclude):
+            continue
+        if _behind_robot(
+            cameras[cam_i], chosen.x, chosen.y, model.diameter / 2, robots, robot_box
+        ):
             continue
         spread = max(
             (math.hypot(a.x - b.x, a.y - b.y) for _, a in singles for _, b in singles),
@@ -387,9 +466,8 @@ class CeilingBottleSource(TargetSource):
         length: float = 0.20,
         diameter: float = 0.066,
         label_length: float = 0.10,
-        # Half the base's diagonal (0.548 x 0.508 m: 0.374) plus 2.6 cm, so the
-        # footprint is covered at any heading.
-        robot_exclusion_half: float = 0.40,
+        # Beyond the base's own footprint at its heading (see RobotBox).
+        robot_margin: float = 0.03,
         num_frames: int = 10,
         frame_period_s: float = 0.12,
         min_iou: float = 0.6,
@@ -416,7 +494,7 @@ class CeilingBottleSource(TargetSource):
         self._cameras = load_ceiling_cameras(self._serials)
         self._model = BottleModel(float(length), float(diameter), float(label_length))
         self._bounds = tuple(float(v) for v in floor_bounds)
-        self._robot_half = float(robot_exclusion_half)
+        self._robot_box = RobotBox(margin=float(robot_margin))
         self._num_frames = int(num_frames)
         self._period = float(frame_period_s)
         self._min_iou = float(min_iou)
@@ -436,14 +514,15 @@ class CeilingBottleSource(TargetSource):
             raise RuntimeError("CeilingBottleSource: no ceiling image arrived")
         return frames
 
-    def _exclusions(self) -> list[tuple[float, float, float]]:
+    def robot_poses(self) -> list[tuple[float, float, float]]:
+        """The robot's map pose (x, y, heading) now, from the marker detector."""
         # The detector answers each request with the pose current when the request
         # arrived, and the client requests at the end of every call, so the first
         # answer after a drive is from before it (2026-11-05: 0.44 m stale, which hid
         # a bottle behind the robot). The second answer is to a request made now.
         self._markers.get_latest()
         poses = self._markers.get_latest().get("poses") or {}
-        return [(float(p[0]), float(p[1]), self._robot_half) for p in poses.values()]
+        return [(float(p[0]), float(p[1]), float(p[2])) for p in poses.values()]
 
     def localize(self) -> BottleFit:
         """Run the localizer now and return the fit (raises if there is no bottle)."""
@@ -452,9 +531,10 @@ class CeilingBottleSource(TargetSource):
             self._cameras,
             self._model,
             self._bounds,
-            exclude=self._exclusions(),
             min_iou=self._min_iou,
             serials=self._serials,
+            robots=self.robot_poses(),
+            robot_box=self._robot_box,
         )
         if fit is None:
             raise RuntimeError(
