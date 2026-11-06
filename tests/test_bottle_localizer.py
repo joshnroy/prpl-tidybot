@@ -14,6 +14,7 @@ from prpl_tidybot.bottle_localizer import (
     BottleModel,
     CeilingBottleSource,
     bottle_mask,
+    find_bottle_candidates,
     label_silhouette,
     localize_bottle,
 )
@@ -313,6 +314,95 @@ def test_the_robot_is_excluded_where_it_is_now_not_where_it_was(cameras):
     markers.pose = new  # then the robot drove away
     x, y, _ = source.get_target()
     assert math.hypot(x - bottle[0], y - bottle[1]) < 0.02
+
+
+class _FixedMarkers:
+    """The robot standing still at ``pose`` (map x, y, heading)."""
+
+    def __init__(self, pose):
+        self.pose = pose
+
+    def get_latest(self):
+        """The robot's pose."""
+        return {"poses": {0: self.pose}}
+
+    def close(self):
+        """Nothing to release."""
+
+
+FULL_FLOOR = (-1.846, 2.046, -1.846, 1.846)
+
+
+def _source(frame, robot_pose):
+    return CeilingBottleSource(
+        SERIALS,
+        image_client=_Images([frame]),
+        marker_client=_FixedMarkers(robot_pose),
+        floor_bounds=FULL_FLOOR,
+        min_iou=0.7,
+        num_frames=1,
+        frame_period_s=0.0,
+    )
+
+
+# observe() #164 and #13 on 2026-11-06 (09-47-01 logs): the robot's marker pose.
+ROBOT_AT_1043 = (1.0701, -0.6282, 3.1368)
+ROBOT_AT_0952 = (1.0109, -0.6189, -3.0910)
+
+
+def test_a_bottle_just_beside_the_base_is_found(cameras):
+    """2026-11-06 10:43, after a toss: the bottle lay 8 cm beyond the base's front and
+    10 cm beyond its side, 0.35 m from its centre on each map axis, so inside the
+    0.40 m square the search used to exclude around the robot whatever its heading,
+    and observe() said no bottle. The base's own rectangle at its heading leaves it
+    in view. A frame from the ceiling video (half resolution, upscaled: its IoU is not
+    the live frame's), everything but the robot and the bottle blacked out."""
+    del cameras
+    path = Path(__file__).parent / "data" / "bottle_beside_the_robot_20261106.png"
+    x, y, _ = _source(cv.imread(str(path)), ROBOT_AT_1043).get_target()
+    assert math.hypot(x - 0.711, y + 0.981) < 0.03
+
+
+@pytest.mark.parametrize(
+    ("name", "pose"),
+    [
+        ("bottle_beside_the_robot_20261106.png", ROBOT_AT_1043),
+        ("robot_alone_20261106.png", ROBOT_AT_0952),
+    ],
+)
+def test_the_robots_own_red_is_still_ignored(cameras, name, pose):
+    """The base carries red cabling up to its top (0.378 m). From the ceiling it
+    lands, mapped to the bottle's height, up to 0.25 m beyond the base's footprint
+    (the cameras look down at an angle), so the flat footprint does not cover it:
+    no red blob near the robot in two real frames is a candidate, except the bottle
+    itself (the frames are the test above's and the robot alone at 09:52)."""
+    frame = cv.imread(str(Path(__file__).parent / "data" / name))
+    robots = _source(frame, pose).robot_poses()
+    found = find_bottle_candidates(frame, cameras, FULL_FLOOR, MODEL, robots=robots)
+    near = [(x, y) for x, y in found if math.hypot(x - pose[0], y - pose[1]) < 0.8]
+    assert all(math.hypot(x - 0.711, y + 0.981) < 0.05 for x, y in near)
+
+
+@pytest.mark.parametrize("heading", [0.0, 0.5, 1.2, -2.3])
+def test_the_base_is_excluded_at_its_heading(cameras, heading):
+    """A label on the base is ignored and one 6 cm beyond its side is found, at any
+    heading: what is excluded is the base's own rectangle, turned with it. The robot
+    stands under the bottom camera, where the base hides the least floor."""
+    rx, ry = 0.0, -0.9
+    c, s = math.cos(heading), math.sin(heading)
+
+    def at(along, across):
+        return rx + c * along - s * across, ry + s * along + c * across
+
+    on = (*at(0.12, 0.0), heading)
+    beside = (*at(0.0, 0.254 + 0.06 + MODEL.diameter / 2), heading)
+    robots = [(rx, ry, heading)]
+    frame = _render(cameras, bottles=[on])
+    assert localize_bottle([frame], cameras, MODEL, BOUNDS, robots=robots) is None
+    frame = _render(cameras, bottles=[beside])
+    fit = localize_bottle([frame], cameras, MODEL, BOUNDS, robots=robots)
+    assert fit is not None
+    assert math.hypot(fit.x - beside[0], fit.y - beside[1]) < 0.02
 
 
 def test_a_label_split_in_two_by_its_dark_band_is_filled_as_one(cameras):
