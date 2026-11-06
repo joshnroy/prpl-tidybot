@@ -313,3 +313,18 @@ def test_the_robot_is_excluded_where_it_is_now_not_where_it_was(cameras):
     markers.pose = new  # then the robot drove away
     x, y, _ = source.get_target()
     assert math.hypot(x - bottle[0], y - bottle[1]) < 0.02
+
+
+def test_a_label_split_in_two_by_its_dark_band_is_filled_as_one(cameras):
+    """2026-11-06 09:34, after a toss: the bottle lay with the label's black band
+    across the middle, splitting the red into two blobs. Each blob's own hull left the
+    band out, so the fit scored 0.636 against min_iou 0.7 and the bottle was lost. A
+    real frame (everything but the bottle blacked out)."""
+    path = (
+        Path(__file__).parent / "data" / "bottle_label_split_by_dark_band_20261106.png"
+    )
+    frame = cv.imread(str(path))
+    fit = localize_bottle([frame], cameras, MODEL, BOUNDS, min_iou=0.7, serials=SERIALS)
+    assert fit is not None
+    assert math.hypot(fit.x - 0.43, fit.y - 0.25) < 0.03
+    assert fit.iou >= 0.75
