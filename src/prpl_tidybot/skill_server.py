@@ -126,6 +126,7 @@ from prpl_tidybot.robot_skills import (
     _retract,
     _set_gripper,
     _WristRecorder,
+    build_neck_check,
     dump_summary,
     plan_dump,
     plan_pick,
@@ -356,6 +357,7 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
         self._wrist_source = wrist_source
         record = bool(cfg.pick.top_down.get("record_wrist", True))
         self.wrist = _WristRecorder(wrist_source if record else None, log_dir)
+        self.neck = build_neck_check(cfg, wrist_source)
         self.ceiling = (
             ceiling if ceiling is not None else _CeilingRecorder(cfg, log_dir)
         )
@@ -699,6 +701,7 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
                 from_bin,
                 self.in_bin,
                 bin_fit if from_bin is None else None,
+                self.neck,
             )
             if failure is not None or held:
                 break
@@ -923,6 +926,11 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
             )
             closed = self.arm.get_gripper_state() >= _CLOSED
             self.gripper_command = 1.0 if closed else 0.0
+            if not closed:
+                # The withdraw leaves the arm stretched over the bin, hiding it from
+                # the ceiling cameras for the look that follows (2026-11-05 14:46).
+                _retract(self.cfg, self.arm, self.stop_event)
+                record["stages"].append({"stage": "retract"})
             return reply | {
                 "dumped": failure is None,
                 "note": failure,

@@ -231,3 +231,85 @@ def test_alternates_are_the_other_cameras_estimates(cameras):
         1,
     )
     assert not source.alternates()
+
+
+# The far bin on 2026-11-05 at 11:10 (observe()'s fit), as `_bin_box` gives it.
+FAR_BIN = (0.24375, 1.3125, 0.0196, 0.365, 0.26)
+
+
+def _bin_box_of(x, y, yaw, length, width):
+    c, s = math.cos(yaw), math.sin(yaw)
+    hx = 0.5 * (abs(length * c) + abs(width * s))
+    hy = 0.5 * (abs(length * s) + abs(width * c))
+    return [x - hx, x + hx, y - hy, y + hy]
+
+
+@pytest.mark.parametrize(
+    ("name", "inside"), [("in", True), ("empty", False), ("live", True)]
+)
+def test_a_bottle_in_the_bin_is_found_by_its_dark_label(cameras, name, inside):
+    """2026-11-05 11:10: a toss landed in the blue bin and observe() said no bottle.
+    In the bin's shadow the label is near black (HSV value ~18, the floor search needs
+    60) and its walls hide most of it, so the floor fit cannot score it. The bin's
+    opening is searched for dark, saturated red instead. Frames from the ceiling
+    video (half resolution, upscaled), everything but the bin blacked out: the bottle
+    in the bin, and the same bin empty 31 s earlier; and a full-resolution live frame
+    with the bottle lying in the far bin (13:4x), which the floor search missed."""
+    path = Path(__file__).parent / "data" / f"bottle_in_far_bin_{name}_20261105.png"
+    source = CeilingBottleSource(
+        SERIALS,
+        image_client=_Images([cv.imread(str(path))]),
+        marker_client=_Markers(),
+        floor_bounds=BOUNDS,
+        num_frames=1,
+        frame_period_s=0.0,
+    )
+    found = source.find_pose_in_box(_bin_box_of(*FAR_BIN))
+    if not inside:
+        assert found is None
+        return
+    assert found is not None
+    x, y, _yaw = found
+    c, s = math.cos(-FAR_BIN[2]), math.sin(-FAR_BIN[2])
+    along = c * (x - FAR_BIN[0]) - s * (y - FAR_BIN[1])
+    across = s * (x - FAR_BIN[0]) + c * (y - FAR_BIN[1])
+    assert abs(along) < FAR_BIN[3] / 2 and abs(across) < FAR_BIN[4] / 2
+
+
+class _PipelinedMarkers:
+    """The marker detector's protocol: each get_latest() returns the answer to the
+    request sent at the end of the previous call, computed when it was sent."""
+
+    def __init__(self, pose):
+        self.pose = pose
+        self._answer = {"poses": {"robot": pose}}
+
+    def get_latest(self):
+        """The pending (possibly stale) answer; then request again, now."""
+        answer, self._answer = self._answer, {"poses": {"robot": self.pose}}
+        return answer
+
+    def close(self):
+        """Nothing to release."""
+
+
+def test_the_robot_is_excluded_where_it_is_now_not_where_it_was(cameras):
+    """2026-11-05 14:46: after the dump the bottle lay behind the robot in plain view,
+    but the search excluded a square around where the robot had stood for the toss
+    before (0.44 m away): the marker client's first answer after a drive is from
+    before it. The exclusion uses a fresh answer."""
+    old, new = (1.0, -0.6, 0.0), (0.55, -0.6, 0.0)
+    bottle = (1.25, -0.55, 0.2)
+    markers = _PipelinedMarkers(old)
+    source = CeilingBottleSource(
+        SERIALS,
+        image_client=_Images([_render(cameras, bottles=[bottle])]),
+        marker_client=markers,
+        floor_bounds=BOUNDS,
+        num_frames=1,
+        frame_period_s=0.0,
+    )
+    markers.get_latest()  # an earlier call left a request pending with `old`
+    markers.pose = new  # then the robot drove away
+    x, y, _ = source.get_target()
+    assert math.hypot(x - bottle[0], y - bottle[1]) < 0.02

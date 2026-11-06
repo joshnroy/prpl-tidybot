@@ -1,5 +1,6 @@
 """Tests for the top-down cube pick ported from Jimmy Wu's TidyBot ``pick_object``."""
 
+import dataclasses
 import math
 import threading
 from importlib import resources
@@ -19,6 +20,8 @@ from prpl_tidybot.top_down_pick import (
     geometry_from_config,
     grasp_search_bounds,
     grasp_succeeded,
+    half_turn,
+    half_turn_sign,
     pointing_down_joints,
     standoff_pose,
     top_down_joint_targets,
@@ -246,3 +249,40 @@ def test_the_symmetry_is_configured_in_degrees():
     """``symmetry_deg`` in the pick config sets the fold."""
     geom = geometry_from_config(OmegaConf.create({"symmetry_deg": 180.0}))
     assert geom.symmetry == pytest.approx(math.pi)
+
+
+@pytest.mark.parametrize("axis_deg", [-80.0, -20.0, 0.0, 35.0, 89.0])
+def test_a_half_turn_puts_the_hand_on_the_bottle_the_other_way_round(axis_deg):
+    """``half_turn`` turns only the wrist (joint 7), by pi, the same way at the hover
+    and the grasp: the same pinch points, the pads still across the bottle, the closing
+    axis reversed; the pose ``yaw_turn`` pi plans."""
+    geom = geometry_from_config(OmegaConf.create({"symmetry_deg": 180.0}))
+    turned_geom = dataclasses.replace(geom, yaw_turn=math.pi)
+    axis = math.radians(axis_deg)
+    hover, grasp = top_down_joint_targets(0.55, 0.0, axis, geom)
+    sign = half_turn_sign(hover)
+    planned = top_down_joint_targets(
+        0.55, 0.0, axis, turned_geom, seed=half_turn(hover, sign)
+    )
+    for q, plan in zip((hover, grasp), planned):
+        t = half_turn(q, sign)
+        assert t[:6] == q[:6]
+        assert t[6] - q[6] == pytest.approx(sign * math.pi)
+        pos, _, closing = forward_kinematics(q, geom)
+        t_pos, _, t_closing = forward_kinematics(t, geom)
+        assert t_pos == pytest.approx(pos, abs=1e-6)
+        assert float(np.dot(closing, t_closing)) == pytest.approx(-1.0, abs=1e-6)
+        p_pos, _, p_closing = forward_kinematics(plan, geom)
+        assert p_pos == pytest.approx(t_pos, abs=0.005)
+        assert float(np.dot(p_closing, t_closing)) == pytest.approx(1.0, abs=1e-3)
+    assert abs(half_turn(hover, sign)[6]) <= math.pi + 1e-9
+
+
+def test_no_turn_is_the_unturned_yaw():
+    """The default ``yaw_turn`` is 0: the cube's closing yaw is unchanged."""
+    assert GEOM.yaw_turn == 0.0
+    for yaw in (-1.2, 0.0, 0.4, 1.5):
+        turned = dataclasses.replace(GEOM, yaw_turn=math.pi)
+        assert cube_closing_yaw(yaw, turned) == pytest.approx(
+            cube_closing_yaw(yaw, GEOM) + math.pi
+        )
