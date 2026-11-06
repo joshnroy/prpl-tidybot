@@ -126,6 +126,7 @@ from prpl_tidybot.robot_skills import (
     _retract,
     _set_gripper,
     _WristRecorder,
+    build_hold_check,
     build_neck_check,
     dump_summary,
     plan_dump,
@@ -358,6 +359,7 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
         record = bool(cfg.pick.top_down.get("record_wrist", True))
         self.wrist = _WristRecorder(wrist_source if record else None, log_dir)
         self.neck = build_neck_check(cfg, wrist_source)
+        self.hold = build_hold_check(cfg, wrist_source)
         self.ceiling = (
             ceiling if ceiling is not None else _CeilingRecorder(cfg, log_dir)
         )
@@ -625,6 +627,7 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
                         "note": f"attempt {attempt} not started: {outcome['note']}"
                     }
                     break
+                reply.pop("wrist_hold", None)  # the last attempt's, if it looked
                 reply |= outcome
                 if reply["held"]:
                     break
@@ -702,8 +705,13 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
                 self.in_bin,
                 bin_fit if from_bin is None else None,
                 self.neck,
+                self.hold,
             )
             if failure is not None or held:
+                break
+            if record["pick_attempts"][-1].get("wrist_hold", {}).get("held") is False:
+                # Lifted and lost: the bottle has fallen somewhere since, so no other
+                # camera's estimate of where it was; the pick's retry looks again.
                 break
         self.wrist.stop()
         if len(record["pick_attempts"]) == start:  # no grasp was started
@@ -725,13 +733,16 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
                     + ("" if reading is None else f" (read {float(reading):.3f})")
                 )
             )
-        return {
+        outcome = {
             "held": held,
             "gripper": float(last.get("gripper") or self.arm.get_gripper_state()),
             "note": note,
             "cube": found,
             "stand": list(base),
         }
+        if "wrist_hold" in last:
+            outcome["wrist_hold"] = last["wrist_hold"]
+        return outcome
 
     def _retreat(self, bin_fit: BinFit | None) -> list[float] | str:
         """After a miss: retract and drive back to the home stand (``toss_pose``), where

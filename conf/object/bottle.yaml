@@ -32,6 +32,20 @@ pick:
     # (robot_skills.BOTTLE_END_UP, prpl_tidybot.bottle_neck). 2026-11-05: 8/12 held
     # neck-up, 4/12 base-up, and throws with identical parameters landed 1.2 m apart.
     orient_bottle_neck: true
+    # Whether the bottle is still in the hand after the lift and the carry: the
+    # gripper reading cannot say (it stays where the fingers stopped when the bottle
+    # slips out; 2026-11-06 pick 20 read 0.262, "held", and the bottle fell during the
+    # carry). One wrist frame at the end of the carry, `settle_s` after the arm stops,
+    # scores how much of the gap between the finger pads is not plain floor
+    # (prpl_tidybot.wrist_hold): 63/63 real holds of 2026-11-05/06 scored 0.33 or
+    # more, the slip and the closes on nothing 0.005 or less. Below `threshold` the
+    # attempt is a miss: the gripper opens there and the pick's retry follows. No
+    # frame or a camera error: the gripper's verdict stands, and the attempt's
+    # wrist_hold says so.
+    wrist_hold_check:
+      enabled: true
+      threshold: 0.15
+      settle_s: 0.3
     # The wrist servo finds the blue foam cube (OpenCV hue 95-130): it does not see
     # the red bottle, and it does see the blue bin (hue ~127).
     lateral_servo:
