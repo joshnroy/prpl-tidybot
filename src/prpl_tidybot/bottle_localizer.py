@@ -88,7 +88,9 @@ def bottle_mask(
     for lo, hi in model.hue_ranges:
         mask |= (hue >= lo) & (hue <= hi)
     mask &= (hsv[:, :, 1] >= model.min_saturation) & (hsv[:, :, 2] >= model.min_value)
-    mask = cv.morphologyEx(mask.astype(np.uint8), cv.MORPH_CLOSE, np.ones((3, 3)))
+    # Bridges the label's black band when it crosses the label and splits the red in
+    # two (2026-11-06: a 4 px gap, scoring 0.636 as two hulls).
+    mask = cv.morphologyEx(mask.astype(np.uint8), cv.MORPH_CLOSE, np.ones((9, 9)))
     contours, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
     filled = np.zeros_like(mask)
     # Each blob's convex hull: the label's dark print and white stripe can reach its
