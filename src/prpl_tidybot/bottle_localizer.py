@@ -138,6 +138,64 @@ _IN_BIN_MIN_VALUE = 10
 _IN_BIN_MIN_PIXELS = 30
 
 
+# A bottle standing in the bin (or leaning cap-up on a wall) hides its whole label
+# behind the walls; only its grey cap shows (2026-11-08: saturation 75-150, value
+# 28-69, ~155 px), inside an opening whose shadowed blue reads saturation > 210 and
+# value < 20. So when no label is seen, anything in the bin's own blue outline that is
+# neither blue nor dark counts as the bottle. Its outline is eroded so the rim's
+# highlights stay out (empty bins at both spots on 2026-11-08: 0 px over 99 frames).
+_BIN_HUE = (100, 130)
+_BIN_MIN_SATURATION = 150
+_OBJECT_MAX_SATURATION = 170
+_OBJECT_MIN_VALUE = 25
+_OBJECT_ERODE_PX = 6
+_OBJECT_MIN_PIXELS = 60
+
+
+def _in_bin_masks(
+    hsv: Any, region: NDArray[np.uint8], model: BottleModel
+) -> tuple[NDArray[np.bool_], NDArray[np.bool_]]:
+    """(label-red pixels, non-bin pixels inside the bin's eroded blue outline) of one
+    image, within ``region``."""
+    red = np.zeros(region.shape, bool)
+    for lo, hi in model.hue_ranges:
+        red |= (hsv[:, :, 0] >= lo) & (hsv[:, :, 0] <= hi)
+    red &= (hsv[:, :, 1] >= _IN_BIN_MIN_SATURATION) & (
+        hsv[:, :, 2] >= _IN_BIN_MIN_VALUE
+    )
+    red &= region > 0
+    blue = (
+        (hsv[:, :, 0] >= _BIN_HUE[0])
+        & (hsv[:, :, 0] <= _BIN_HUE[1])
+        & (hsv[:, :, 1] >= _BIN_MIN_SATURATION)
+        & (region > 0)
+    )
+    other = np.zeros(region.shape, bool)
+    count, labels, stats, _ = cv.connectedComponentsWithStats(blue.astype(np.uint8))
+    if count > 1:
+        largest = 1 + int(np.argmax(stats[1:, cv.CC_STAT_AREA]))
+        outline: Any = np.zeros(region.shape, np.uint8)
+        hull = cv.convexHull(cv.findNonZero((labels == largest).astype(np.uint8)))
+        cv.fillConvexPoly(outline, hull, (1,))
+        size = 2 * _OBJECT_ERODE_PX + 1
+        outline = cv.erode(outline, np.ones((size, size), np.uint8))
+        other = (
+            (outline > 0)
+            & (hsv[:, :, 1] < _OBJECT_MAX_SATURATION)
+            & (hsv[:, :, 2] > _OBJECT_MIN_VALUE)
+        )
+    return red, other
+
+
+def _largest_blob(mask: NDArray[np.bool_]) -> NDArray[np.int64]:
+    """The (row, col) pixels of the largest connected blob of ``mask``."""
+    count, labels, stats, _ = cv.connectedComponentsWithStats(mask.astype(np.uint8))
+    if count < 2:
+        return np.zeros((0, 2), np.int64)
+    largest = 1 + int(np.argmax(stats[1:, cv.CC_STAT_AREA]))
+    return np.argwhere(labels == largest)
+
+
 def find_bottle_in_box(  # pylint: disable=too-many-locals
     frames: Sequence[NDArray[np.uint8]],
     cameras: Sequence[CeilingCamera],
@@ -148,11 +206,17 @@ def find_bottle_in_box(  # pylint: disable=too-many-locals
     """The bottle's (x, y, yaw) inside the floor box ``box`` (x_min, x_max, y_min,
     y_max; the bin), or None: label-red pixels seen through the box's top at
     ``rim_height``, from the camera that sees the most, cast down to the bottle's axis
-    height. The yaw is the red pixels' long axis on the floor (0 for a round blob)."""
+    height. The yaw is the red pixels' long axis on the floor (0 for a round blob).
+
+    With no label in view, a blob of anything but the bin inside the bin's opening
+    (a standing bottle's cap) is the bottle, cast down from the bottle's standing
+    height, yaw 0."""
     corners = np.array(
         [[x, y, rim_height] for x in box[:2] for y in box[2:]], dtype=np.float64
     )
-    best: tuple[int, int, NDArray[np.float64]] | None = None
+    best: tuple[int, int, NDArray[np.int64]] | None = None
+    # The camera and blob of the largest object seen, for when no label is.
+    other_camera, other_blob = -1, np.zeros((0, 2), np.int64)
     for i, camera in enumerate(cameras):
         imgs = [_split(f, len(cameras))[i] for f in frames]
         rows, cols = imgs[0].shape[:2]
@@ -163,22 +227,32 @@ def find_bottle_in_box(  # pylint: disable=too-many-locals
         cv.fillConvexPoly(region, hull, (1,))
         region &= _valid_rows(rows, cols, i, len(cameras)).astype(np.uint8)
         votes = np.zeros((rows, cols), np.float32)
+        other_votes = np.zeros((rows, cols), np.float32)
         for img in imgs:
-            hsv: Any = cv.cvtColor(img, cv.COLOR_BGR2HSV)
-            red = np.zeros((rows, cols), bool)
-            for lo, hi in model.hue_ranges:
-                red |= (hsv[:, :, 0] >= lo) & (hsv[:, :, 0] <= hi)
-            red &= (hsv[:, :, 1] >= _IN_BIN_MIN_SATURATION) & (
-                hsv[:, :, 2] >= _IN_BIN_MIN_VALUE
+            red, other = _in_bin_masks(
+                cv.cvtColor(img, cv.COLOR_BGR2HSV), region, model
             )
-            votes += red & (region > 0)
+            votes += red
+            other_votes += other
         pixels = np.argwhere(votes >= len(imgs) / 2)
         if len(pixels) >= _IN_BIN_MIN_PIXELS and (
             best is None or len(pixels) > best[1]
         ):
             best = (i, len(pixels), pixels)
+        blob = _largest_blob(other_votes >= len(imgs) / 2)
+        if len(blob) >= max(_OBJECT_MIN_PIXELS, len(other_blob) + 1):
+            other_camera, other_blob = i, blob
     if best is None:
-        return None
+        if other_camera < 0:
+            return None
+        camera = cameras[other_camera]
+        floor = np.array(
+            [camera.to_floor(float(u), float(v), model.length) for v, u in other_blob]
+        )
+        x, y = floor.mean(axis=0)
+        if not (box[0] <= x <= box[1] and box[2] <= y <= box[3]):
+            return None
+        return float(x), float(y), 0.0
     camera = cameras[best[0]]
     floor = np.array(
         [camera.to_floor(float(u), float(v), model.diameter / 2) for v, u in best[2]]
