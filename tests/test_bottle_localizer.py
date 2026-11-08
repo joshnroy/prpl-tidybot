@@ -431,6 +431,7 @@ BINS_20261108 = {
     "empty_far_c": (0.24875, 1.05375, 0.03272, 0.365, 0.26),
     "empty_close_a": (-0.11875, -0.69625, 1.4399, 0.365, 0.26),
     "empty_close_b": (-0.22437, -0.76, 1.55771, 0.365, 0.26),
+    "empty_close_c": (-0.155, -1.02, 1.4923, 0.365, 0.26),
 }
 
 
@@ -481,10 +482,19 @@ def test_a_bottle_lying_in_the_bin_is_still_found_by_its_label(cameras, name, xy
 
 @pytest.mark.parametrize(
     "name",
-    ["empty_far_a", "empty_far_b", "empty_far_c", "empty_close_a", "empty_close_b"],
+    [
+        "empty_far_a",
+        "empty_far_b",
+        "empty_far_c",
+        "empty_close_a",
+        "empty_close_b",
+        "empty_close_c",
+    ],
 )
 def test_an_empty_bin_reads_empty(cameras, name):
     """Empty bins from 2026-11-08 at both spots and through the day (10:30, 11:36,
-    12:53 far; 11:12, 12:14 close): the rim, walls, highlights and shadows are not an
-    object in the bin."""
+    12:53 far; 11:12, 12:14, 17:33 close): the rim, walls, highlights and shadows are
+    not an object in the bin. At 17:33 the close bin sat almost under a camera, which
+    saw its lit floor (hue 122-126, saturation 156-169, value 122-139) and the run
+    dumped the empty bin three times."""
     assert _find_in_bin_20261108(cameras, name) is None

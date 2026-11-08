@@ -144,10 +144,14 @@ _IN_BIN_MIN_PIXELS = 30
 # value < 20. So when no label is seen, anything in the bin's own blue outline that is
 # neither blue nor dark counts as the bottle. Its outline is eroded so the rim's
 # highlights stay out (empty bins at both spots on 2026-11-08: 0 px over 99 frames).
+# A bin almost straight under a camera shows its own lit floor instead, a brighter and
+# slightly washed-out blue (17:33: saturation 156-169, value 122-139), so the cap is
+# also capped in brightness.
 _BIN_HUE = (100, 130)
 _BIN_MIN_SATURATION = 150
 _OBJECT_MAX_SATURATION = 170
 _OBJECT_MIN_VALUE = 25
+_OBJECT_MAX_VALUE = 100
 _OBJECT_ERODE_PX = 6
 _OBJECT_MIN_PIXELS = 60
 
@@ -183,6 +187,7 @@ def _in_bin_masks(
             (outline > 0)
             & (hsv[:, :, 1] < _OBJECT_MAX_SATURATION)
             & (hsv[:, :, 2] > _OBJECT_MIN_VALUE)
+            & (hsv[:, :, 2] < _OBJECT_MAX_VALUE)
         )
     return red, other
 
