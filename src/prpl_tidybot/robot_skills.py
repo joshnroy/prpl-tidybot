@@ -757,7 +757,7 @@ def _drive_to(
     workspace: Workspace | None = None,
     stop: threading.Event | None = None,
     bin_fit: BinFit | None = None,
-    detour: bool = False,
+    detour: bool = True,
 ) -> tuple[float, float, float]:
     """Drive the base to the map-frame pose with the kinematic3d executor (as
     hardware_tests/test_base_map_target.py does); returns the reached pose.

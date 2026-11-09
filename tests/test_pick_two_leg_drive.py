@@ -84,7 +84,7 @@ def test_the_1532_straight_drive_clips_the_bin():
     )
     problem = WS_1532.straight_problem(ROBOT_1532, stand, BIN_1532)
     assert problem is not None and "overlaps the bin" in problem
-    assert WS_1532.plan_path(ROBOT_1532, stand, BIN_1532)[1] is not None
+    assert WS_1532.plan_path(ROBOT_1532, stand, BIN_1532, detour=False)[1] is not None
 
 
 def test_the_1532_pick_drives_there_through_a_waypoint():
@@ -108,7 +108,7 @@ def test_the_1532_pick_drives_there_through_a_waypoint():
         pytest.approx(GEOM.standoff)
     )
     # The waypoint drive is the pick's only: a plain plan_path still refuses.
-    assert WS_1532.plan_path(ROBOT_1532, stand, BIN_1532)[1] is not None
+    assert WS_1532.plan_path(ROBOT_1532, stand, BIN_1532, detour=False)[1] is not None
     assert WS_1532.plan_path(ROBOT_1532, stand, BIN_1532, detour=True) == (legs, None)
 
 

@@ -230,17 +230,18 @@ class Workspace:
         start: Sequence[float],
         goal: Sequence[float],
         bin_fit: BinFit | None = None,
+        detour: bool = True,
     ) -> str | None:
         """Why the base cannot drive from ``start`` to ``goal``
         (:meth:`plan_path`), or None."""
-        return self.plan_path(start, goal, bin_fit)[1]
+        return self.plan_path(start, goal, bin_fit, detour)[1]
 
     def plan_path(
         self,
         start: Sequence[float],
         goal: Sequence[float],
         bin_fit: BinFit | None = None,
-        detour: bool = False,
+        detour: bool = True,
     ) -> tuple[list[tuple[float, float, float]], str | None]:
         """The straight legs from ``start`` to ``goal`` ([goal], [back-off, goal] or,
         with ``detour``, [waypoint, goal]) and None, or ([], why the drive is refused).
