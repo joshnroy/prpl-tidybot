@@ -196,3 +196,39 @@ def describe_toss(
         "release_fraction": float(travel[gripper_release_ms] / travel[-1]),
         "release_joints_deg": [float(q) for q in trajectory[gripper_release_ms]],
     }
+
+
+def summarize_swing(trace: dict[str, Any]) -> dict[str, Any]:
+    """What the arm measurably did during the swing, from the 1 kHz loop's trace
+    (``TorqueControlledArm.run_position_trajectory``): peak measured joint speed, the
+    measured joints and joint velocities at the cycle the gripper-open command was
+    first sent, and the largest per-joint gap between measured and commanded position.
+
+    Measured and commanded are compared on the same cycle, so the tracking error
+    includes the one-frame feedback delay. Cycles whose feedback failed are NaN and
+    skipped; at release the first cycle with feedback from there on is used.
+    """
+    t = np.asarray(trace["t"], dtype=np.float64)
+    q = np.asarray(trace["q_deg"], dtype=np.float64)
+    dq = np.asarray(trace["dq_deg_s"], dtype=np.float64)
+    commanded = np.asarray(trace["commanded_deg"], dtype=np.float64)
+    valid = np.flatnonzero(~np.isnan(t))
+    release = int(trace["release_cycle"])
+    summary: dict[str, Any] = {
+        "measured_release_cycle": release,
+        "failed_cycles": int(trace["failed_cycles"]),
+        "measured_cycles": int(valid.size),
+    }
+    if valid.size == 0:
+        return summary
+    error = (q[valid] - commanded[valid] + 180.0) % 360.0 - 180.0
+    summary["measured_max_vel_deg_s"] = float(np.abs(dq[valid]).max())
+    summary["max_tracking_error_deg"] = float(np.abs(error).max())
+    after = valid[valid >= release] if release >= 0 else valid[:0]
+    if after.size:
+        k = int(after[0])
+        summary["measured_release_feedback_cycle"] = k
+        summary["measured_release_time_s"] = float(t[k] - t[valid[0]])
+        summary["measured_release_joints_deg"] = [float(v) for v in q[k]]
+        summary["measured_release_joint_vel_deg_s"] = [float(v) for v in dq[k]]
+    return summary

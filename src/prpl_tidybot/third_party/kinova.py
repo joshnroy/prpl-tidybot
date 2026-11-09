@@ -419,10 +419,19 @@ class TorqueControlledArm:
             motor_cmd.velocity = 0
             motor_cmd.force = 100
 
+            # What the arm did, per cycle, from the feedback each Refresh already
+            # returns. Preallocated so the 1 kHz loop only stores floats; a cycle
+            # whose Refresh failed stays NaN rather than repeating the last frame.
+            n_cycles = len(trajectory)
+            measured_t = np.full(n_cycles, np.nan)
+            measured_q = np.full((n_cycles, self.actuator_count), np.nan)
+            measured_dq = np.full((n_cycles, self.actuator_count), np.nan)
+            release_cycle = -1
+
             cyclic_count = 0
             failed_cyclic_count = 0
             t_cyclic = time.time()
-            while cyclic_count < len(trajectory):
+            while cyclic_count < n_cycles:
                 t_now = time.time()
                 if t_now - t_cyclic < 0.001:  # 1 kHz
                     continue
@@ -435,8 +444,15 @@ class TorqueControlledArm:
                 if cyclic_count >= gripper_release_step:
                     motor_cmd.position = 0
                     motor_cmd.velocity = 100
+                    if release_cycle < 0:
+                        release_cycle = cyclic_count
                 try:
                     feedback = self.base_cyclic.Refresh(command, 0, self.send_options)
+                    measured_t[cyclic_count] = t_now
+                    for i in range(self.actuator_count):
+                        actuator = feedback.actuators[i]
+                        measured_q[cyclic_count, i] = actuator.position
+                        measured_dq[cyclic_count, i] = actuator.velocity
                 except:
                     failed_cyclic_count += 1
                 cyclic_count += 1
@@ -444,6 +460,14 @@ class TorqueControlledArm:
                 f"Position trajectory: {cyclic_count} cycles, "
                 f"{failed_cyclic_count} failed"
             )
+            return {
+                "t": measured_t,
+                "q_deg": measured_q,
+                "dq_deg_s": measured_dq,
+                "commanded_deg": np.asarray(trajectory, dtype=np.float64),
+                "release_cycle": int(release_cycle),
+                "failed_cycles": int(failed_cyclic_count),
+            }
         finally:
             base_servo_mode = Base_pb2.ServoingModeInformation()
             base_servo_mode.servoing_mode = Base_pb2.SINGLE_LEVEL_SERVOING
