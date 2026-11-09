@@ -160,7 +160,10 @@ _OBJECT_MIN_PIXELS = 60
 
 
 def _in_bin_masks(
-    hsv: Any, region: NDArray[np.uint8], model: BottleModel
+    hsv: Any,
+    region: NDArray[np.uint8],
+    model: BottleModel,
+    min_value: float = _IN_BIN_MIN_VALUE,
 ) -> tuple[NDArray[np.bool_], NDArray[np.bool_]]:
     """(label-red pixels, non-bin pixels inside the bin's eroded blue outline) of one
     image, within ``region``."""
@@ -168,9 +171,7 @@ def _in_bin_masks(
     for lo, hi in model.hue_ranges:
         top = min(hi, _IN_BIN_MAX_LOW_HUE) if lo == 0 else hi
         red |= (hsv[:, :, 0] >= lo) & (hsv[:, :, 0] <= top)
-    red &= (hsv[:, :, 1] >= _IN_BIN_MIN_SATURATION) & (
-        hsv[:, :, 2] >= _IN_BIN_MIN_VALUE
-    )
+    red &= (hsv[:, :, 1] >= _IN_BIN_MIN_SATURATION) & (hsv[:, :, 2] >= min_value)
     red &= region > 0
     blue = (
         (hsv[:, :, 0] >= _BIN_HUE[0])
@@ -211,11 +212,14 @@ def find_bottle_in_box(  # pylint: disable=too-many-locals
     model: BottleModel,
     box: Sequence[float],
     rim_height: float,
+    min_value: float = _IN_BIN_MIN_VALUE,
 ) -> tuple[float, float, float] | None:
     """The bottle's (x, y, yaw) inside the floor box ``box`` (x_min, x_max, y_min,
     y_max; the bin), or None: label-red pixels seen through the box's top at
     ``rim_height``, from the camera that sees the most, cast down to the bottle's axis
     height. The yaw is the red pixels' long axis on the floor (0 for a round blob).
+    ``min_value`` is the label's darkest red: a cardboard box's creases read label-red
+    at value 13-37, the blue bin's shaded label lower still.
 
     With no label in view, a blob of anything but the bin inside the bin's opening
     (a standing bottle's cap) is the bottle, cast down from the bottle's standing
@@ -239,7 +243,7 @@ def find_bottle_in_box(  # pylint: disable=too-many-locals
         other_votes = np.zeros((rows, cols), np.float32)
         for img in imgs:
             red, other = _in_bin_masks(
-                cv.cvtColor(img, cv.COLOR_BGR2HSV), region, model
+                cv.cvtColor(img, cv.COLOR_BGR2HSV), region, model, min_value
             )
             votes += red
             other_votes += other
@@ -556,6 +560,7 @@ class CeilingBottleSource(TargetSource):
         min_iou: float = 0.6,
         host: str | None = None,
         in_bin_rim_height: float = 0.384,
+        in_bin_min_value: float = _IN_BIN_MIN_VALUE,
     ) -> None:
         if image_client is None:
             from prpl_tidybot.marker_detector.ceiling_image_client import (  # pylint: disable=import-outside-toplevel
@@ -582,6 +587,7 @@ class CeilingBottleSource(TargetSource):
         self._period = float(frame_period_s)
         self._min_iou = float(min_iou)
         self._rim_height = float(in_bin_rim_height)
+        self._in_bin_min_value = float(in_bin_min_value)
         self.last_fit: BottleFit | None = None
 
     def _frames(self) -> list[NDArray[np.uint8]]:
@@ -632,7 +638,12 @@ class CeilingBottleSource(TargetSource):
         """The bottle's (x, y, yaw) inside the floor box ``box`` (the bin), or None (see
         :func:`find_bottle_in_box`); the skill server looks here before the floor."""
         return find_bottle_in_box(
-            self._frames()[-3:], self._cameras, self._model, box, self._rim_height
+            self._frames()[-3:],
+            self._cameras,
+            self._model,
+            box,
+            self._rim_height,
+            self._in_bin_min_value,
         )
 
     def get_target(self) -> tuple[float, float, float]:
