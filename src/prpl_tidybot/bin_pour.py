@@ -484,6 +484,65 @@ def _plan_at(  # pylint: disable=too-many-arguments,too-many-positional-argument
     return reasons
 
 
+def _rot_z(angle: float) -> NDArray[np.float64]:
+    """A rotation about the vertical."""
+    c, s = math.cos(angle), math.sin(angle)
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+
+def set_down_path(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    plan: BinPourPlan,
+    bin_fit: BinFit,
+    geom: TopDownPickGeometry,
+    pour: BinPourGeometry,
+    grasped_from: Sequence[float],
+    base: Sequence[float],
+    held: Sequence[float],
+) -> dict[str, list[list[float]]]:
+    """The lower and withdraw for the base at ``base`` (map) that set the bin down
+    where it was grasped, the base then at ``grasped_from``: the pinch point back over
+    the same map point, the pads at the same map heading.
+
+    The base's turn back stops inside its drive's heading tolerance, a few degrees
+    short of the grasp heading, and the bin hangs 0.76 m out on the arm: the planned
+    lower set it down ~6 cm away, turned by the base's error, every dump (2026-11-08,
+    2026-11-09). From ``held`` (the joints holding the bin up) the pinch point moves
+    level to over the grasp point, then straight down. Raises ``ValueError`` if the
+    IK does not solve."""
+    rim_q = next(s for s in plan.stages if s.name == "rim").arm[-1]
+    rim_pos, rim_rot = _tool_frame(rim_q, geom)
+    up_pos, _ = _tool_frame(held, geom)
+
+    def base_to_map(
+        pose: Sequence[float], p: NDArray[np.float64]
+    ) -> NDArray[np.float64]:
+        c, s = math.cos(pose[2]), math.sin(pose[2])
+        bx, by = p[0] + geom.mounting_offset, p[1]
+        return np.array([pose[0] + c * bx - s * by, pose[1] + s * bx + c * by])
+
+    gx, gy = base_to_map(grasped_from, rim_pos)
+    dx, dy = gx - base[0], gy - base[1]
+    c, s = math.cos(base[2]), math.sin(base[2])
+    x = c * dx + s * dy - geom.mounting_offset
+    y = -s * dx + c * dy
+    turn = grasped_from[2] - base[2]
+    turn = (turn + math.pi) % (2 * math.pi) - math.pi
+    rot = _rot_z(turn) @ rim_rot
+    _, across = _spans(bin_fit, plan.face)
+    fine: list[list[float]] = []
+    for z in [
+        float(up_pos[2]),
+        *_steps(float(up_pos[2]), float(rim_pos[2]), pour.lift_step),
+    ]:
+        fine.append(tool_joints((x, y, z), rot, geom, (fine or [list(held)])[-1]))
+    hover = tool_joints((x, y, float(rim_pos[2]) + pour.hover), rot, geom, fine[-1])
+    return {
+        "lower": simplify_path(held, fine, geom, pour, across, plan.side, bin_fit),
+        "withdraw": [hover],
+        "lower_fine": fine,
+    }
+
+
 def _pour_xy(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     q: Sequence[float],
     base: Sequence[float],

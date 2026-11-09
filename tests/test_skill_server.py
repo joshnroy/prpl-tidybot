@@ -12,6 +12,7 @@ import pytest
 from hydra import compose, initialize_config_dir
 from spatialmath import SE2
 
+from prpl_tidybot import robot_skills
 from prpl_tidybot.aimed_toss import Barrier, Workspace, footprint
 from prpl_tidybot.bin_localizer import BinFit, ConstantBinSource
 from prpl_tidybot.bin_pour import BinPourGeometry
@@ -29,7 +30,7 @@ from prpl_tidybot.skill_server import (
     serve,
 )
 from prpl_tidybot.third_party.constants import RETRACT_ARM_CONF
-from prpl_tidybot.top_down_pick import geometry_from_config
+from prpl_tidybot.top_down_pick import forward_kinematics, geometry_from_config
 from prpl_tidybot.visual_servo.top_down_cube import TopDownLateralServo
 
 _CONF_DIR = Path(__file__).resolve().parent.parent / "conf"
@@ -1440,6 +1441,67 @@ def test_an_angular_dump_never_streams_to_a_released_arm():
     reply = skills.dump_bin()
     assert reply["dumped"], reply
     assert not skills.arm.released
+
+
+def _pinch_in_map(skills):
+    """The pinch point (map x, y) and the pads' axis heading (map) where the arm and
+    base are now."""
+    pos, approach, closing = forward_kinematics(skills.arm.get_arm_state(), skills.geom)
+    pads = np.cross(closing, approach)
+    x, y, theta = _base(skills)
+    ax, ay = pos[0] + skills.geom.mounting_offset, pos[1]
+    c, s = math.cos(theta), math.sin(theta)
+    return (
+        np.array([x + c * ax - s * ay, y + s * ax + c * ay]),
+        theta + math.atan2(pads[1], pads[0]),
+    )
+
+
+def test_a_dump_sets_the_bin_down_where_it_grasped_it_though_the_base_stops_short(
+    skills, monkeypatch
+):
+    """2026-11-08 trial 5 and 2026-11-09: every dump moved the box ~6 cm and turned
+    it ~3 degrees. The base's turn back stops inside the drive's 0.1 rad heading
+    tolerance, 2-5 degrees short of the grasp heading and always on the same side,
+    and the arm lowered the bin along the path planned for the grasp heading, so the
+    0.76 m lever set it down rotated about the base. The set-down is re-planned for
+    the base pose the turn back reached: the gripper opens over the map point, and
+    with the pads at the map heading, where it closed."""
+    _bin_near(skills)
+    base = skills.real_env.interface.base_interface
+    original = robot_skills._drive_straight  # pylint: disable=protected-access
+    held_drives = []
+
+    def short_of_heading(real_env, pose, stop):
+        reached = original(real_env, pose, stop)
+        if skills.arm.get_gripper_state() > 0.5:
+            held_drives.append(pose)
+            if len(held_drives) == 2:  # the turn back: 4 degrees short, 1 cm off
+                x, y, theta = reached
+                short = SE2(x + 0.01, y - 0.005, theta - math.radians(4.0))
+                base.base_state = short
+                base.map_base_state = short
+                reached = (short.x, short.y, short.theta())
+        return reached
+
+    monkeypatch.setattr(robot_skills, "_drive_straight", short_of_heading)
+    grips = []
+    set_gripper = skills.arm.set_gripper_angular
+
+    def gripper(position, timeout=4.0):
+        grips.append((position, *_pinch_in_map(skills)))
+        return set_gripper(position, timeout)
+
+    monkeypatch.setattr(skills.arm, "set_gripper_angular", gripper)
+    reply = skills.dump_bin()
+    assert reply["dumped"], reply
+    assert len(held_drives) == 2
+    assert [g[0] for g in grips][-2:] == [1.0, 0.0]
+    _, grasp_xy, grasp_heading = grips[-2]
+    _, release_xy, release_heading = grips[-1]
+    assert np.linalg.norm(release_xy - grasp_xy) < 0.005
+    turned = (release_heading - grasp_heading) % math.pi
+    assert min(turned, math.pi - turned) < math.radians(0.5)
 
 
 def test_the_fake_arm_refuses_a_streamed_command_while_released():

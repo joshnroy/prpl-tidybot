@@ -33,6 +33,7 @@ from prpl_tidybot.bin_pour import (
     BinPourPlan,
     plan_bin_pour,
     pour_point,
+    set_down_path,
 )
 from prpl_tidybot.bottle_neck import EndLook, top_end
 from prpl_tidybot.gripper_shape import (
@@ -1208,7 +1209,7 @@ def _dump_bin(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     try:
         try:
             failure = _run_dump_stages(
-                cfg, real_env, mover, step, plan, record, read, stop
+                cfg, real_env, mover, step, plan, bin_fit, record, read, stop
             )
         except (ValueError, RuntimeError) as e:
             # An arm or base error mid-dump is a stop-short reply, not a raise. Until
@@ -1226,20 +1227,26 @@ def _dump_bin(  # pylint: disable=too-many-arguments,too-many-positional-argumen
         mover.end()
 
 
-def _run_dump_stages(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+def _run_dump_stages(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
     cfg: DictConfig,
     real_env: Any,
     mover: "_Mover",
     step: Callable[[str], None],
     plan: BinPourPlan,
+    bin_fit: BinFit,
     record: dict[str, Any],
     read: Callable[[float], float],
     stop: threading.Event | None,
 ) -> str | None:
-    """The dump's stages (see :func:`_dump_bin`); returns why it stopped short."""
+    """The dump's stages (see :func:`_dump_bin`); returns why it stopped short.
+
+    The lower and withdraw are re-planned (:func:`_set_down_path`) for the base pose
+    the turn back reached, so the bin goes down where it was grasped."""
     held_max = float((cfg.get("dump_bin") or {}).get("held_max", 0.97))
     stages: list[dict[str, Any]] = record["stages"]
     planned = plan.stand
+    grasped_from: tuple[float, float, float] | None = None
+    set_down: dict[str, list[list[float]]] = {}
     for stage in plan.stages:
         step(f"dump: {stage.name}")
         entry: dict[str, Any] = {"stage": stage.name}
@@ -1252,6 +1259,10 @@ def _run_dump_stages(  # pylint: disable=too-many-arguments,too-many-positional-
             _drive_to(real_env, list(stage.base), None, stop, None)
             mover.begin()
             planned = stage.base
+        if stage.name == "lower" and grasped_from is not None:
+            set_down = _set_down_path(
+                cfg, real_env, mover, plan, bin_fit, grasped_from, record
+            )
         if stage.name in ("close", "open"):
             reading = read(mover.gripper(stage.gripper))
             entry["gripper"] = reading
@@ -1262,13 +1273,71 @@ def _run_dump_stages(  # pylint: disable=too-many-arguments,too-many-positional-
                     stages.append({"stage": "withdraw"})
                     mover.move("dump_withdraw", list(plan.stages[0].arm[-1]))
                     return f"no grip on the bin's rim (gripper read {reading:.2f})"
+                grasped_from = _map_pose(real_env)
             continue
-        if not mover.move_path(f"dump_{stage.name}", [list(q) for q in stage.arm]):
+        path = set_down.get(stage.name, [list(q) for q in stage.arm])
+        if not mover.move_path(f"dump_{stage.name}", path):
             held = " (the bin is still held)" if stage.gripper > 0.5 else ""
             return f"dump: {stage.name} did not arrive{held}"
         if stage.hold_s:
             time.sleep(stage.hold_s)
     return None
+
+
+def _map_pose(real_env: Any) -> tuple[float, float, float]:
+    """The base's map pose now."""
+    obs, _ = real_env.reset()
+    here = obs.map_base_pose
+    return (float(here.x), float(here.y), float(here.theta()))
+
+
+def _set_down_path(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    cfg: DictConfig,
+    real_env: Any,
+    mover: "_Mover",
+    plan: BinPourPlan,
+    bin_fit: BinFit,
+    grasped_from: tuple[float, float, float],
+    record: dict[str, Any],
+) -> dict[str, list[list[float]]]:
+    """The lower and withdraw that set the bin down where it was grasped
+    (:func:`set_down_path`), from the base pose the turn back reached; recorded in
+    ``record["set_down"]``. If the IK does not solve, the planned ones (and the bin
+    goes down where the base's error puts it)."""
+    base = _map_pose(real_env)
+    turn = (grasped_from[2] - base[2] + math.pi) % (2 * math.pi) - math.pi
+    entry: dict[str, Any] = {
+        "grasped_from": list(grasped_from),
+        "base": list(base),
+        "base_shift_m": math.hypot(
+            base[0] - grasped_from[0], base[1] - grasped_from[1]
+        ),
+        "base_turn_deg": math.degrees(turn),
+    }
+    record["set_down"] = entry
+    try:
+        path = set_down_path(
+            plan,
+            bin_fit,
+            mover.geom,
+            pour_geometry_from_config(cfg.get("dump_bin")),
+            grasped_from,
+            base,
+            mover.joints(),
+        )
+    except ValueError as e:
+        entry["replanned"] = False
+        entry["why"] = str(e)
+        _logger.warning("Dump set-down not re-planned (%s): the planned lower.", e)
+        return {}
+    entry["replanned"] = True
+    _logger.info(
+        "Dump set-down re-planned for the base %.3f m and %+.2f deg off its grasp "
+        "pose.",
+        entry["base_shift_m"],
+        entry["base_turn_deg"],
+    )
+    return {"lower": path["lower"], "withdraw": path["withdraw"]}
 
 
 # An onboard-controller move that ends further than this from its goal has hit
