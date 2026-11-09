@@ -618,9 +618,9 @@ def test_a_missed_grasp_drives_back_to_the_toss_pose_to_relocalize(
     drives: list[tuple[float, ...]] = []
     original = ss._drive_to  # pylint: disable=protected-access
 
-    def drive_to(real_env, pose, *args):
+    def drive_to(real_env, pose, *args, **kwargs):
         drives.append(tuple(round(v, 3) for v in pose))
-        return original(real_env, pose, *args)
+        return original(real_env, pose, *args, **kwargs)
 
     monkeypatch.setattr(ss, "_drive_to", drive_to)
     operator = _Operator()
