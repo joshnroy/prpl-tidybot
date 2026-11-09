@@ -813,7 +813,7 @@ def test_without_a_direction_the_toss_stands_on_the_spots_fixed_side(
     "args",
     [
         (1.2, 150.0, 700.0, 0.0),
-        (1.2, 120.0, 400.0, 0.0),
+        (1.2, 120.0, 390.0, 0.0),
         (2.0, 120.0, 700.0, 0.0),
         (1.2, 120.0, 700.0, math.pi / 2),  # across the barrier
     ],

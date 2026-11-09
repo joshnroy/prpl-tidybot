@@ -151,7 +151,7 @@ def test_a_toss_grid_and_an_aimed_toss_together_fail_before_anything_moves(
     "param, value",
     [
         ("toss.aimed.speed", 150.0),
-        ("toss.aimed.speed", 80.0),
+        ("toss.aimed.speed", 70.0),
         ("toss.aimed.release_ms", 900.0),
         ("toss.aimed.standoff", 2.0),
     ],
