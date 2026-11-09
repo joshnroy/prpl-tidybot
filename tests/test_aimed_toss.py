@@ -34,7 +34,7 @@ def _bin(x=-0.6, y=0.0, yaw=0.0):
 
 @pytest.mark.parametrize(
     "params",
-    [(0.9, 100.0, 500.0), (1.45, 140.0, 850.0), (1.2, 120.0, 600.0)],
+    [(0.9, 80.0, 400.0), (1.45, 140.0, 850.0), (1.2, 120.0, 600.0)],
 )
 def test_parameters_inside_the_real_box_are_accepted(params):
     """The corners and the middle of the box pass."""
@@ -46,9 +46,9 @@ def test_parameters_inside_the_real_box_are_accepted(params):
     [
         ((0.89, 120.0, 600.0), "standoff"),
         ((1.46, 120.0, 600.0), "standoff"),
-        ((1.2, 99.0, 600.0), "speed"),
+        ((1.2, 79.0, 600.0), "speed"),
         ((1.2, 141.0, 600.0), "speed"),
-        ((1.2, 120.0, 499.0), "release_ms"),
+        ((1.2, 120.0, 399.0), "release_ms"),
         ((1.2, 120.0, 851.0), "release_ms"),
         ((1.2, float("nan"), 600.0), "speed"),
     ],
@@ -59,9 +59,19 @@ def test_parameters_outside_the_real_box_are_rejected(params, word):
         RealTossBounds().validate(*params)
 
 
-def test_every_toss_in_the_box_is_thrown_forward_and_up():
+def test_the_toss_box_is_80_to_140_deg_s_and_400_to_850_ms():
+    """Widened from 100-140 x 500-850 (Josh, 2026-11-09) so that untrained throws into
+    the cardboard box mostly miss: random throws in the old box scored ~7/9."""
+    bounds = RealTossBounds()
+    assert bounds.speed == (80.0, 140.0)
+    assert bounds.release_ms == (400.0, 850.0)
+
+
+def test_every_toss_in_the_box_is_thrown_forward_and_never_steeply_down():
     """The derivation the bounds rest on: over the whole (speed, release) box the pinch
-    point moves forward and upward at the release cycle (arm frame +x, +z)."""
+    point moves forward at the release cycle (arm frame +x) and at most gently down
+    (+z): an early release at 400 ms leaves ~0.15 m/s downward, a flat throw ahead.
+    850 ms stays the ceiling: at 140 deg/s a later release moves backward."""
     geom = TopDownPickGeometry()
     bounds = RealTossBounds()
     for speed in np.linspace(*bounds.speed, 5):
@@ -73,7 +83,7 @@ def test_every_toss_in_the_box_is_thrown_forward_and_up():
             after = forward_kinematics(np.deg2rad(traj[release + 1]), geom)[0]
             velocity = (after - here) / 0.001
             assert velocity[0] > 0.0, (speed, release)
-            assert velocity[2] > 0.1, (speed, release)
+            assert velocity[2] > -0.25, (speed, release)
             assert abs(velocity[1]) < 0.05, (speed, release)
 
 

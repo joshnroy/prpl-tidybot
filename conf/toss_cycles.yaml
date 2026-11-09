@@ -67,14 +67,14 @@ toss:
 # The box of real toss parameters (prpl_tidybot.aimed_toss.RealTossBounds). From
 # this arm's swing (prpl_tidybot.toss: trapezoidal, at most 140 deg/s, fixed release
 # pose, heading 0) and a ballistic model of the release state, validated within
-# ~0.1 m against a real throw: at every speed in [100, 140] deg/s and release cycle in
-# [500, 850] ms the cube leaves moving forward and up (tests/test_aimed_toss.py pins
-# this), and lands at rim height 0.9-1.45 m from the base centre. Anything outside
+# ~0.1 m against a real throw: at every speed in [80, 140] deg/s and release cycle in
+# [400, 850] ms the cube leaves moving forward and at most gently down
+# (tests/test_aimed_toss.py pins this), and lands at rim height 0.9-1.45 m from the base centre. Anything outside
 # is rejected before the arm or base moves.
 real_toss_bounds:
   standoff: [0.9, 1.45]
-  speed: [100.0, 140.0]
-  release_ms: [500.0, 850.0]
+  speed: [80.0, 140.0]
+  release_ms: [400.0, 850.0]
 
 # Tossing3D's barrier: a rectangle on the floor the robot never crosses (it works on
 # the robot_side side). Every base pose and straight drive keeps the whole footprint

@@ -9,12 +9,14 @@ heading 0, so the cube flies straight ahead along the base's heading. The real b
 (:class:`RealTossBounds`) come from that swing and a ballistic model of the cube from
 the release state (validated within ~0.1 m against a real throw):
 
-* ``speed`` 100-140 deg/s: 140 is the most this arm has thrown (``TOSS_MAX_VEL``);
-  below ~100 the cube does not reach a bin outside the base's own footprint.
-* ``release_ms`` 500-850: across this window, at every speed above, the pinch point
-  moves forward *and* up at release (forward speed >= 0.03 m/s, upward >= 0.17 m/s),
-  so the cube is thrown ahead and never down at the floor or back at the robot. At
-  140 deg/s and 850 ms it is almost straight up (it lands ~0.1 m ahead of release).
+* ``speed`` 80-140 deg/s: 140 is the most this arm has thrown (``TOSS_MAX_VEL``).
+  Below ~100 the cube may not reach a bin outside the base's own footprint; the box
+  includes such throws on purpose (Josh, 2026-11-09), so untrained throws mostly miss.
+* ``release_ms`` 400-850: across this window, at every speed above, the pinch point
+  moves forward at release and at most gently down (an early release at 400 ms leaves
+  ~0.15 m/s downward with 0.75-1.2 m/s forward: a flat throw ahead), so the cube is
+  never thrown steeply down at the floor or back at the robot. 850 ms is the ceiling:
+  at 140 deg/s a later release moves backward.
 * ``standoff`` 0.9-1.45 m, base centre to bin centre: the span of rim-height landing
   distances that box produces.
 
@@ -54,12 +56,12 @@ Pose = tuple[float, float, float]
 
 @dataclass(frozen=True)
 class RealTossBounds:
-    """The box of real toss parameters every one of which is a safe, forward, upward
-    throw (see the module docstring for the derivation)."""
+    """The box of real toss parameters every one of which is a safe, forward throw
+    (see the module docstring for the derivation)."""
 
     standoff: tuple[float, float] = (0.9, 1.45)
-    speed: tuple[float, float] = (100.0, 140.0)
-    release_ms: tuple[float, float] = (500.0, 850.0)
+    speed: tuple[float, float] = (80.0, 140.0)
+    release_ms: tuple[float, float] = (400.0, 850.0)
 
     def validate(self, standoff: float | None, speed: float, release_ms: float) -> None:
         """Raise ``ValueError`` naming every parameter outside the box (or not a finite
