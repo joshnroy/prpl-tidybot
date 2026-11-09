@@ -5,6 +5,7 @@ can be read back after a miss."""
 # pylint: disable=protected-access,too-few-public-methods
 
 import builtins
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -14,6 +15,8 @@ from prpl_tidybot.third_party import kinova
 from prpl_tidybot.toss import summarize_swing
 
 _LAG = 5  # cycles the fake arm's measured position trails the command by
+_GRIPPER_DELAY = 7  # cycles from the open command until the fingers move
+_SLOW_CYCLES = (10, 40)  # cycles whose Refresh takes 3 ms
 _DOF = 7
 
 
@@ -39,12 +42,16 @@ def _command():
 
 class _LaggingCyclic:
     """Feedback that trails the command by ``_LAG`` cycles, with a velocity unrelated
-    to the plan (a constant 33 deg/s), and one dropped frame at cycle 3."""
+    to the plan (a constant 33 deg/s), and one dropped frame at cycle 3. The gripper
+    (50 of 100) starts opening, 5 per cycle, ``_GRIPPER_DELAY`` cycles after the first
+    open command; the Refresh of each of ``_SLOW_CYCLES`` takes 3 ms."""
 
     def __init__(self, start, cycles):
         self.history = [list(start)]
         self.calls = 0
         self.cycles = cycles
+        self.gripper = 50.0
+        self.open_sent_at = None
 
     @property
     def in_loop(self):
@@ -57,7 +64,9 @@ class _LaggingCyclic:
         return SimpleNamespace(
             actuators=[SimpleNamespace(position=v, velocity=33.0) for v in q],
             interconnect=SimpleNamespace(
-                gripper_feedback=SimpleNamespace(motor=[SimpleNamespace(position=0.5)])
+                gripper_feedback=SimpleNamespace(
+                    motor=[SimpleNamespace(position=self.gripper, velocity=-1.0)]
+                )
             ),
         )
 
@@ -68,7 +77,17 @@ class _LaggingCyclic:
     def Refresh(self, command, *_args):  # pylint: disable=invalid-name
         """Send one command; the reply carries the lagging feedback."""
         self.calls += 1
+        cycle = self.calls - 2
         self.history.append([a.position for a in command.actuators])
+        motor = command.interconnect.gripper_command.motor_cmd[0]
+        if self.open_sent_at is None and getattr(motor, "position", None) == 0:
+            self.open_sent_at = cycle
+        if self.open_sent_at is not None and cycle >= (
+            self.open_sent_at + _GRIPPER_DELAY
+        ):
+            self.gripper = max(0.0, self.gripper - 5.0)
+        if cycle in _SLOW_CYCLES:
+            time.sleep(0.003)
         if self.calls == 2 + 3:
             raise RuntimeError("the arm moved but its reply was lost")
         return self._feedback()
@@ -171,3 +190,26 @@ def test_the_summary_is_computed_from_the_measured_trace(lagging_arm):
     )
     assert summary["measured_release_cycle"] == 20
     assert summary["failed_cycles"] == 1
+
+
+def test_the_trace_times_the_loop_and_sees_the_gripper_open(lagging_arm):
+    """Gripper position and each Refresh's duration are recorded per cycle; the
+    summary finds when the fingers moved and how often the loop stalled."""
+    arm, _cyclic, trajectory = lagging_arm
+    trace = arm.run_position_trajectory(trajectory, gripper_release_step=20)
+    assert trace["gripper_pos"][19] == 50.0
+    assert np.isnan(trace["gripper_pos"][3]) and np.isnan(trace["gripper_vel"][3])
+    assert trace["gripper_vel"][30] == -1.0
+    assert trace["refresh_ms"].shape == trace["loop_gap_ms"].shape == (60,)
+    assert np.isnan(trace["loop_gap_ms"][0])
+    for slow in _SLOW_CYCLES:
+        assert trace["refresh_ms"][slow] >= 3.0
+    summary = summarize_swing(trace)
+    assert summary["measured_gripper_open_cycle"] == 20 + _GRIPPER_DELAY
+    assert summary["measured_gripper_open_delay_ms"] == pytest.approx(
+        (trace["t"][20 + _GRIPPER_DELAY] - trace["t"][20]) * 1000.0
+    )
+    assert summary["refresh_ms_max"] >= 3.0
+    assert summary["refresh_ms_p99"] <= summary["refresh_ms_max"]
+    # The cycle after each slow Refresh starts more than 1.5 ms after the one before.
+    assert summary["stall_cycles_over_1p5ms"] >= len(_SLOW_CYCLES)

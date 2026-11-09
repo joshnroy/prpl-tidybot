@@ -231,4 +231,40 @@ def summarize_swing(trace: dict[str, Any]) -> dict[str, Any]:
         summary["measured_release_time_s"] = float(t[k] - t[valid[0]])
         summary["measured_release_joints_deg"] = [float(v) for v in q[k]]
         summary["measured_release_joint_vel_deg_s"] = [float(v) for v in dq[k]]
+    if "gripper_pos" in trace:
+        summary |= _summarize_gripper_and_timing(trace, t, release)
+    return summary
+
+
+# Gripper motor position is 0 (open) to 100 (closed); 2 of 100 is 2% of travel.
+GRIPPER_MOVED_THRESHOLD = 2.0
+STALL_CYCLE_MS = 1.5
+
+
+def _summarize_gripper_and_timing(
+    trace: dict[str, Any], t: NDArray[np.float64], release: int
+) -> dict[str, Any]:
+    """When the fingers first moved after the open command, and how long each
+    Refresh took / how often a cycle started over ``STALL_CYCLE_MS`` after the last."""
+    gripper = np.asarray(trace["gripper_pos"], dtype=np.float64)
+    refresh = np.asarray(trace["refresh_ms"], dtype=np.float64)
+    gap = np.asarray(trace["loop_gap_ms"], dtype=np.float64)
+    summary: dict[str, Any] = {
+        "refresh_ms_max": float(np.nanmax(refresh)),
+        "refresh_ms_p99": float(np.nanpercentile(refresh, 99)),
+        # A cycle's period is the last cycle's Refresh plus the gap before this one.
+        "stall_cycles_over_1p5ms": int(
+            np.count_nonzero(refresh[:-1] + gap[1:] > STALL_CYCLE_MS)
+        ),
+    }
+    if 0 <= release < len(gripper) and not np.isnan(gripper[release]):
+        moved = np.flatnonzero(
+            np.abs(gripper[release:] - gripper[release]) > GRIPPER_MOVED_THRESHOLD
+        )
+        if moved.size:
+            k = release + int(moved[0])
+            summary["measured_gripper_open_cycle"] = k
+            summary["measured_gripper_open_delay_ms"] = float(
+                (t[k] - t[release]) * 1000.0
+            )
     return summary
