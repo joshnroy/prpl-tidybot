@@ -656,7 +656,12 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
         bin_fit = look.bin_fit
         try:
             base = _drive_to(
-                self.real_env, list(stand), self.workspace, self.stop_event, bin_fit
+                self.real_env,
+                list(stand),
+                self.workspace,
+                self.stop_event,
+                bin_fit,
+                detour=True,
             )
         except ValueError as e:  # checked before the base moved
             record["pick_attempts"].append(
