@@ -136,6 +136,9 @@ def _valid_rows(rows: int, cols: int, index: int, num: int) -> NDArray[np.float3
 _IN_BIN_MIN_SATURATION = 150
 _IN_BIN_MIN_VALUE = 10
 _IN_BIN_MIN_PIXELS = 30
+# Inside a bin the label's red stops at hue 4: a cardboard box's shaded inner wall
+# reads hue 8 at saturation ~198 (2026-11-08), where the label's band used to end.
+_IN_BIN_MAX_LOW_HUE = 4
 
 
 # A bottle standing in the bin (or leaning cap-up on a wall) hides its whole label
@@ -163,7 +166,8 @@ def _in_bin_masks(
     image, within ``region``."""
     red = np.zeros(region.shape, bool)
     for lo, hi in model.hue_ranges:
-        red |= (hsv[:, :, 0] >= lo) & (hsv[:, :, 0] <= hi)
+        top = min(hi, _IN_BIN_MAX_LOW_HUE) if lo == 0 else hi
+        red |= (hsv[:, :, 0] >= lo) & (hsv[:, :, 0] <= top)
     red &= (hsv[:, :, 1] >= _IN_BIN_MIN_SATURATION) & (
         hsv[:, :, 2] >= _IN_BIN_MIN_VALUE
     )
