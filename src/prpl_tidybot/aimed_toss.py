@@ -44,6 +44,8 @@ BASE_LENGTH = 0.548
 BASE_WIDTH = 0.508
 # The base's footprint turns within this circle about its centre.
 _TURN_RADIUS = 0.5 * math.hypot(BASE_LENGTH, BASE_WIDTH)
+# The spacing (m) of the waypoints a refused pick drive may detour through.
+DETOUR_GRID = 0.1
 # How much further a back-off goes, for the drive's tracking error.
 BACK_OFF_SLACK = 0.02
 
@@ -238,16 +240,71 @@ class Workspace:
         start: Sequence[float],
         goal: Sequence[float],
         bin_fit: BinFit | None = None,
+        detour: bool = False,
     ) -> tuple[list[tuple[float, float, float]], str | None]:
-        """The straight legs from ``start`` to ``goal`` ([goal], or [back-off, goal])
-        and None, or ([], why the drive is refused).
+        """The straight legs from ``start`` to ``goal`` ([goal], [back-off, goal] or,
+        with ``detour``, [waypoint, goal]) and None, or ([], why the drive is refused).
 
         Straight to the goal when :meth:`straight_problem` allows it. Otherwise,
         when the base is too near the barrier to turn freely (a turn towards it swings
         a corner closer: run9 at the far toss stand), first back straight away from
         the barrier along its normal with no turn (:meth:`back_off_pose`), then drive
-        on; both legs must pass the full check.
+        on; both legs must pass the full check. With ``detour`` (the pick's drive to
+        its standoff), when both are refused, through the one waypoint
+        :meth:`detour_waypoint` finds; the refusal is otherwise unchanged.
         """
+        legs, problem = self._plan_path(start, goal, bin_fit)
+        if problem is None or not detour:
+            return legs, problem
+        goal_pose = (float(goal[0]), float(goal[1]), float(goal[2]))
+        via = self.detour_waypoint(start, goal_pose, bin_fit)
+        if via is None:
+            return [], f"{problem}; no single waypoint clears it either"
+        return [via, goal_pose], None
+
+    def detour_waypoint(
+        self,
+        start: Sequence[float],
+        goal: Sequence[float],
+        bin_fit: BinFit | None = None,
+    ) -> tuple[float, float, float] | None:
+        """The waypoint of the shortest two-leg drive from ``start`` to ``goal``, or
+        None: a point on a ``DETOUR_GRID`` m grid inside the drivable box, heading the
+        start's or the goal's, where the base may stand and both straight legs pass
+        :meth:`straight_problem`."""
+        fb = self.floor_bounds
+        xs = np.arange(
+            math.ceil(fb[0] / DETOUR_GRID), math.floor(fb[1] / DETOUR_GRID) + 1
+        )
+        ys = np.arange(
+            math.ceil(fb[2] / DETOUR_GRID), math.floor(fb[3] / DETOUR_GRID) + 1
+        )
+        candidates = []
+        for i in xs:
+            for j in ys:
+                x, y = float(i * DETOUR_GRID), float(j * DETOUR_GRID)
+                length = math.hypot(x - start[0], y - start[1]) + math.hypot(
+                    goal[0] - x, goal[1] - y
+                )
+                for theta in (float(start[2]), float(goal[2])):
+                    candidates.append((length, (x, y, theta)))
+        candidates.sort(key=lambda c: c[0])  # stable: grid order breaks ties
+        for _, via in candidates:
+            if (
+                self.pose_problem(via, bin_fit) is None
+                and self.straight_problem(start, via, bin_fit) is None
+                and self.straight_problem(via, goal, bin_fit) is None
+            ):
+                return via
+        return None
+
+    def _plan_path(
+        self,
+        start: Sequence[float],
+        goal: Sequence[float],
+        bin_fit: BinFit | None = None,
+    ) -> tuple[list[tuple[float, float, float]], str | None]:
+        """:meth:`plan_path` without the detour."""
         goal_pose = (float(goal[0]), float(goal[1]), float(goal[2]))
         direct = self.straight_problem(start, goal_pose, bin_fit)
         if direct is None:

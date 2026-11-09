@@ -654,9 +654,9 @@ def test_a_missed_pick_retreats_relocalizes_and_retries(skills, monkeypatch):
 
     original = ss._drive_to  # pylint: disable=protected-access
 
-    def drive_to(real_env, pose, *args):
+    def drive_to(real_env, pose, *args, **kwargs):
         drives.append([round(float(v), 3) for v in pose])
-        return original(real_env, pose, *args)
+        return original(real_env, pose, *args, **kwargs)
 
     monkeypatch.setattr(ss, "_drive_to", drive_to)
     skills.bin_source = _CountingBins(skills.bin_source)

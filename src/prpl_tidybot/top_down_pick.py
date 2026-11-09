@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import math
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, fields
 from typing import Any
 
@@ -108,6 +108,22 @@ def standoff_pose(
     swings the approach round the cube in 15-degree steps (nearest first) until it is on
     the floor.
     """
+    for pose in standoff_poses(robot, cube_xy, geom, floor_bounds, is_valid):
+        return pose
+    raise ValueError(
+        f"No standoff for a cube at {tuple(cube_xy)} inside {tuple(floor_bounds)}."
+    )
+
+
+def standoff_poses(
+    robot: Sequence[float],
+    cube_xy: Sequence[float],
+    geom: TopDownPickGeometry,
+    floor_bounds: Sequence[float],
+    is_valid: Callable[[tuple[float, float, float]], bool] | None = None,
+) -> Iterator[tuple[float, float, float]]:
+    """Every standoff :func:`standoff_pose` would accept, in the order it tries them
+    (its first is :func:`standoff_pose`'s)."""
     cx, cy = cube_xy
     direct = math.atan2(cy - robot[1], cx - robot[0])  # direction of travel to the cube
     for k in range(25):
@@ -121,10 +137,7 @@ def standoff_pose(
                 and floor_bounds[2] <= y <= floor_bounds[3]
                 and (is_valid is None or is_valid(pose))
             ):
-                return pose
-    raise ValueError(
-        f"No standoff for a cube at {tuple(cube_xy)} inside {tuple(floor_bounds)}."
-    )
+                yield pose
 
 
 def grasp_search_bounds(
