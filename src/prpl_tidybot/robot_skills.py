@@ -74,6 +74,8 @@ from prpl_tidybot.wrist_hold import HoldCheck, HoldLook
 _logger = logging.getLogger(__name__)
 
 _MAX_DRIVE_TICKS = 600
+# The most straight legs one checked drive takes, replanning after each.
+MAX_DRIVE_LEGS = 4
 # The bottle's end held toward the top of the wrist frame (pick.top_down.
 # orient_bottle_neck): the neck, as in 15 of the 25 picks of 2026-11-05 (8/12 of
 # Josh's labelled holds), so most of the throws the toss parameters were fitted on
@@ -768,15 +770,21 @@ def _drive_to(
     turning, or with ``detour`` drive through one waypoint) and a drive that would
     leave it raises ``ValueError`` before the base moves. A set ``stop`` ends the
     drive (``ArmMotionAborted``) without another command.
+
+    A plan of more than one leg drives only its first, then plans again from the pose
+    the base actually reached, up to ``MAX_DRIVE_LEGS`` legs; a plan refused there
+    raises ``ValueError`` saying the base had moved.
     """
-    legs = [(float(pose[0]), float(pose[1]), float(pose[2]))]
-    if workspace is not None:
-        obs, _ = real_env.reset()
-        here = obs.map_base_pose
-        start = (float(here.x), float(here.y), float(here.theta()))
-        legs, problem = workspace.plan_path(start, pose, bin_fit, detour)
-        if problem is not None:
-            raise ValueError(f"Drive refused: {problem}.")
+    goal = (float(pose[0]), float(pose[1]), float(pose[2]))
+    if workspace is None:
+        return _drive_straight(real_env, goal, stop)
+    obs, _ = real_env.reset()
+    here = obs.map_base_pose
+    start = (float(here.x), float(here.y), float(here.theta()))
+    legs, problem = workspace.plan_path(start, goal, bin_fit, detour)
+    if problem is not None:
+        raise ValueError(f"Drive refused: {problem}.")
+    for k in range(1, MAX_DRIVE_LEGS + 1):
         if detour and len(legs) > 1 and legs[0] != workspace.back_off_pose(start):
             _logger.info(
                 "Driving through the waypoint (%+.3f, %+.3f) to clear the straight "
@@ -790,11 +798,19 @@ def _drive_to(
                 legs[0][0],
                 legs[0][1],
             )
-    reached: tuple[float, float, float] | None = None
-    for leg in legs:
-        reached = _drive_straight(real_env, leg, stop)
-    assert reached is not None
-    return reached
+        start = _drive_straight(real_env, legs[0], stop)
+        if len(legs) == 1:
+            return start
+        legs, problem = workspace.plan_path(start, goal, bin_fit, detour)
+        if problem is not None:
+            raise ValueError(
+                f"Drive refused after leg {k} (the base moved, to ({start[0]:+.3f}, "
+                f"{start[1]:+.3f})): {problem}."
+            )
+    raise ValueError(
+        f"Drive stopped after {MAX_DRIVE_LEGS} legs short of ({goal[0]:+.3f}, "
+        f"{goal[1]:+.3f}), at ({start[0]:+.3f}, {start[1]:+.3f})."
+    )
 
 
 def _drive_straight(

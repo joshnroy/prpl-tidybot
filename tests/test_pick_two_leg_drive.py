@@ -112,29 +112,111 @@ def test_the_1532_pick_drives_there_through_a_waypoint():
     assert WS_1532.plan_path(ROBOT_1532, stand, BIN_1532, detour=True) == (legs, None)
 
 
+class _FakeBase:
+    """A base whose straight legs end ``miss`` (a function of the leg's index and
+    target) instead of at their target; ``drives`` lists each leg's (start, target)."""
+
+    def __init__(self, start, miss=lambda k, target: target):
+        self.pose = tuple(start)
+        self.miss = miss
+        self.drives = []
+
+    def reset(self):  # pylint: disable=missing-function-docstring
+        return type("Obs", (), {"map_base_pose": SE2(*self.pose)})(), {}
+
+    def drive_straight(self, real_env, pose, stop):
+        """The patched ``_drive_straight``."""
+        assert real_env is self and stop is None
+        self.drives.append((self.pose, tuple(pose)))
+        self.pose = tuple(float(v) for v in self.miss(len(self.drives), tuple(pose)))
+        return self.pose
+
+
+def _drive(monkeypatch, base, goal, detour=True):
+    monkeypatch.setattr(robot_skills, "_drive_straight", base.drive_straight)
+    return robot_skills._drive_to(
+        base, list(goal), WS_1532, None, BIN_1532, detour=detour
+    )
+
+
 def test_the_picks_drive_follows_the_waypoint_legs_in_order(monkeypatch):
     """``_drive_to(..., detour=True)`` (the pick's drive) plans from where the base is
     and drives each returned leg straight, waypoint first; without ``detour`` the same
     drive is refused before anything moves."""
-
-    class _Env:
-        def reset(self):  # pylint: disable=missing-function-docstring
-            return type("Obs", (), {"map_base_pose": SE2(*ROBOT_1532)})(), {}
-
-    driven = []
-    monkeypatch.setattr(
-        robot_skills,
-        "_drive_straight",
-        lambda real_env, pose, stop: driven.append(tuple(pose)) or tuple(pose),
-    )
     stand, legs, _ = pick_stand(ROBOT_1532, CUBE_1532, GEOM, FLOOR, WS_1532, BIN_1532)
+    base = _FakeBase(ROBOT_1532)
     with pytest.raises(ValueError, match="overlaps the bin"):
-        robot_skills._drive_to(_Env(), list(stand), WS_1532, None, BIN_1532)
-    assert not driven
-    reached = robot_skills._drive_to(
-        _Env(), list(stand), WS_1532, None, BIN_1532, detour=True
+        _drive(monkeypatch, base, stand, detour=False)
+    assert not base.drives
+    assert _drive(monkeypatch, base, stand) == pytest.approx(stand)
+    assert [target for _, target in base.drives] == pytest.approx(legs)
+
+
+def test_each_leg_is_replanned_from_where_the_base_actually_stopped(monkeypatch):
+    """The base stops 4 cm and 3 degrees off the waypoint: the next leg starts from
+    the pose it reached (read back from the base), not the planned waypoint, and
+    still passes the straight check."""
+    stand, legs, _ = pick_stand(ROBOT_1532, CUBE_1532, GEOM, FLOOR, WS_1532, BIN_1532)
+    off = (0.03, -0.0265, math.radians(3.0))
+
+    def miss(k, target):
+        return tuple(t + o for t, o in zip(target, off)) if k == 1 else target
+
+    base = _FakeBase(ROBOT_1532, miss)
+    assert _drive(monkeypatch, base, stand) == pytest.approx(stand)
+    assert len(base.drives) == 2
+    (first_start, first_target), (second_start, second_target) = (
+        base.drives[0],
+        base.drives[1],
     )
-    assert driven == legs and reached == stand
+    assert first_start == pytest.approx(ROBOT_1532)
+    assert first_target == pytest.approx(legs[0])
+    reached = tuple(t + o for t, o in zip(legs[0], off))
+    assert second_start == pytest.approx(reached, abs=1e-9)
+    assert second_start != pytest.approx(legs[0])
+    assert second_target == pytest.approx(stand)
+    assert WS_1532.straight_problem(second_start, second_target, BIN_1532) is None
+
+
+def test_a_bigger_miss_is_replanned_round_the_bin_not_driven_blind(monkeypatch):
+    """8 cm along x and 6 cm along -y off the waypoint, the planned second leg would
+    clip the bin from where the base stopped: the drive replans from there, through a
+    new waypoint, and every leg it drives passes the straight check from the pose it
+    actually starts at."""
+    stand, legs, _ = pick_stand(ROBOT_1532, CUBE_1532, GEOM, FLOOR, WS_1532, BIN_1532)
+    off = (0.08, -0.06, 0.0)
+    reached = tuple(t + o for t, o in zip(legs[0], off))
+    assert WS_1532.straight_problem(reached, stand, BIN_1532) is not None
+
+    def miss(k, target):
+        return tuple(t + o for t, o in zip(target, off)) if k == 1 else target
+
+    base = _FakeBase(ROBOT_1532, miss)
+    assert _drive(monkeypatch, base, stand) == pytest.approx(stand)
+    assert len(base.drives) == 3
+    assert base.drives[1][0] == pytest.approx(reached, abs=1e-9)
+    for start, target in base.drives:
+        assert WS_1532.straight_problem(start, target, BIN_1532) is None
+
+
+def test_a_replan_refused_midway_stops_and_says_where(monkeypatch):
+    """The base ends its first leg somewhere no drive to the goal is allowed from (on
+    the bin): the drive stops there with a refusal that says it had moved."""
+    stand, _, _ = pick_stand(ROBOT_1532, CUBE_1532, GEOM, FLOOR, WS_1532, BIN_1532)
+    base = _FakeBase(ROBOT_1532, lambda k, target: (BIN_1532.x, BIN_1532.y, 0.0))
+    with pytest.raises(ValueError, match="after leg 1") as err:
+        _drive(monkeypatch, base, stand)
+    assert "bin" in str(err.value)
+    assert len(base.drives) == 1
+
+
+def test_a_drive_that_never_gets_there_stops_at_the_leg_limit(monkeypatch):
+    """A base that never moves: the drive gives up after ``MAX_DRIVE_LEGS`` legs."""
+    stand, _, _ = pick_stand(ROBOT_1532, CUBE_1532, GEOM, FLOOR, WS_1532, BIN_1532)
+    base = _FakeBase(ROBOT_1532, lambda k, target: ROBOT_1532)
+    with pytest.raises(ValueError, match="legs"):
+        _drive(monkeypatch, base, stand)
+    assert len(base.drives) == robot_skills.MAX_DRIVE_LEGS
 
 
 def test_a_pick_solvable_straight_keeps_its_one_leg_plan():
