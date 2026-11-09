@@ -411,12 +411,32 @@ def test_from_inside_the_margin_the_far_stands_pick_backs_off_first():
     assert worst >= _clearance(WS_1020, start) - 1e-9
 
 
-def test_a_refused_back_off_refuses_the_drive_and_says_so():
-    """No room behind the robot (the bin there): the drive is refused, and the reason
-    names the back-off."""
+def test_a_refused_back_off_goes_round_sideways_instead():
+    """No room behind the robot (the bin there): the back-off is refused, so the grid
+    route slides along the tape to where the base can turn, and every leg passes the
+    straight-drive check."""
     behind = BinFit(x=0.235, y=-0.55, yaw=0.0, length=0.39, width=0.29, height=0.21)
     assert WS_1020.pose_problem(FAR_STAND, behind) is None
+    back = WS_1020.back_off_pose(FAR_STAND)
+    assert back is not None
+    assert "bin" in WS_1020.straight_problem(FAR_STAND, back, behind)
+    waypoints, problem = WS_1020.plan_path(FAR_STAND, RUN9_STANDOFF, behind)
+    assert problem is None and len(waypoints) >= 2
+    assert waypoints[0][2] == pytest.approx(FAR_STAND[2])  # slides, no turn yet
+    here = FAR_STAND
+    for leg in waypoints:
+        assert WS_1020.straight_problem(here, leg, behind) is None
+        here = leg
+    assert waypoints[-1] == pytest.approx(RUN9_STANDOFF)
+
+
+def test_a_refusal_with_no_route_still_names_the_back_off():
+    """The same stand with the tape so close to the bin's sides that the base cannot
+    slide out: refused, and the reason names the back-off and the grid."""
+    behind = BinFit(x=0.235, y=-0.55, yaw=0.0, length=2.6, width=0.29, height=0.21)
+    assert WS_1020.pose_problem(FAR_STAND, behind) is None
+    assert WS_1020.pose_problem(RUN9_STANDOFF, behind) is None
     waypoints, problem = WS_1020.plan_path(FAR_STAND, RUN9_STANDOFF, behind)
     assert not waypoints and problem is not None
-    assert "back" in problem and "bin" in problem
+    assert "back" in problem and "bin" in problem and "no route" in problem
     assert WS_1020.path_problem(FAR_STAND, RUN9_STANDOFF, behind) == problem
