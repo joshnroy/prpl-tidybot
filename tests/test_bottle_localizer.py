@@ -432,6 +432,7 @@ BINS_20261108 = {
     "empty_close_a": (-0.11875, -0.69625, 1.4399, 0.365, 0.26),
     "empty_close_b": (-0.22437, -0.76, 1.55771, 0.365, 0.26),
     "empty_close_c": (-0.155, -1.02, 1.4923, 0.365, 0.26),
+    "empty_cardboard_close": (-0.07625, -0.99063, 1.51844, 0.29, 0.39),
 }
 
 
@@ -489,6 +490,7 @@ def test_a_bottle_lying_in_the_bin_is_still_found_by_its_label(cameras, name, xy
         "empty_close_a",
         "empty_close_b",
         "empty_close_c",
+        "empty_cardboard_close",
     ],
 )
 def test_an_empty_bin_reads_empty(cameras, name):
@@ -496,5 +498,7 @@ def test_an_empty_bin_reads_empty(cameras, name):
     12:53 far; 11:12, 12:14, 17:33 close): the rim, walls, highlights and shadows are
     not an object in the bin. At 17:33 the close bin sat almost under a camera, which
     saw its lit floor (hue 122-126, saturation 156-169, value 122-139) and the run
-    dumped the empty bin three times."""
+    dumped the empty bin three times. The cardboard box (22:15, after a dump): its
+    shaded inner wall reads hue 8, saturation ~198, value ~94, at the end of the
+    label's red band."""
     assert _find_in_bin_20261108(cameras, name) is None
