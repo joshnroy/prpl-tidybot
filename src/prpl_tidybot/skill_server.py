@@ -349,6 +349,8 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
         self.stop_event = threading.Event()
         self.gripper_command = 1.0 if arm.get_gripper_state() >= _CLOSED else 0.0
         self.calls = _CallLog(log_dir)
+        self.log_dir = None if log_dir is None else Path(log_dir)
+        self._swings = 0
         # The skill calls in progress (indices), replaced whole so that the motion
         # log reads it without a lock; the lock is for the writers.
         self.active_calls: tuple[int, ...] = ()
@@ -843,6 +845,17 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
             swing["release_time"] = swing["swing_start_time"] + float(
                 swing["release_time_s"]
             )
+        if timing and "swing_trace" in timing:
+            # The arm server's measured summary goes beside the plan; the per-cycle
+            # trace goes to its own file so skill_calls.jsonl stays small.
+            swing.update(
+                {
+                    k: v
+                    for k, v in timing.items()
+                    if k not in ("swing_start_time", "swing_trace")
+                }
+            )
+            swing["trace_file"] = self._save_swing_trace(timing["swing_trace"])
         self.gripper_command = 0.0
         self._step("Retract the arm after the toss")
         _retract(self.cfg, self.arm, self.stop_event)
@@ -872,6 +885,17 @@ class TossingSkills:  # pylint: disable=too-many-instance-attributes
             )
             | base
         )
+
+    def _save_swing_trace(self, trace: dict[str, Any]) -> str | None:
+        """Write one toss's per-cycle trace to ``<log dir>/swing_NNN.npz``."""
+        self._swings += 1
+        if self.log_dir is None:
+            return None
+        name = f"swing_{self._swings:03d}.npz"
+        np.savez_compressed(
+            self.log_dir / name, **{k: np.asarray(v) for k, v in trace.items()}
+        )
+        return name
 
     def _dump_plan(self, bin_fit: BinFit | None) -> tuple[Any, str | None]:
         return plan_dump(
