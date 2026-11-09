@@ -32,6 +32,12 @@ pick:
     # (robot_skills.BOTTLE_END_UP, prpl_tidybot.bottle_neck). 2026-11-05: 8/12 held
     # neck-up, 4/12 base-up, and throws with identical parameters landed 1.2 m apart.
     orient_bottle_neck: true
+    # The held band (top_down_pick.grasp_succeeded): a reading outside it is a miss,
+    # so the gripper opens and the pick retries. 2026-11-09: 68/70 bottle holds read
+    # 0.288-0.555; the other two (0.725, a grasp on the neck, and 0.843) were thrown
+    # as held. The cube keeps 0.2 .. 0.9 (2026-10-21: 27/27 at 0.463-0.585).
+    grasp_min: 0.27
+    grasp_max: 0.60
     # The wrist servo finds the blue foam cube (OpenCV hue 95-130): it does not see
     # the red bottle, and it does see the blue bin (hue ~127).
     lateral_servo:
