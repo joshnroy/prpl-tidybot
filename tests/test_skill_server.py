@@ -29,7 +29,7 @@ from prpl_tidybot.skill_server import (
     serve,
 )
 from prpl_tidybot.third_party.constants import RETRACT_ARM_CONF
-from prpl_tidybot.top_down_pick import geometry_from_config
+from prpl_tidybot.top_down_pick import geometry_from_config, grasp_succeeded
 from prpl_tidybot.visual_servo.top_down_cube import TopDownLateralServo
 
 _CONF_DIR = Path(__file__).resolve().parent.parent / "conf"
@@ -1168,6 +1168,52 @@ def test_with_the_hold_check_off_the_bottle_pick_reads_no_frame_after_the_carry(
     skills.close()
     assert reply["held"] is True and camera.reads == 1
     assert "wrist_hold" not in reply["attempts"][-1]
+
+
+def test_the_bottles_held_band_is_narrower_than_the_cubes():
+    """A bottle grasp counts as held only in ``pick.top_down.grasp_min`` ..
+    ``grasp_max`` = 0.27 .. 0.60: the 2026-11-09 holds read 0.288-0.555 (68/70), and
+    the two above it (0.725, a grasp on the neck, and 0.843) were bad grasps. The
+    cube keeps its own 0.2 .. 0.9 (2026-10-21 holds: 0.463-0.585)."""
+    bottle = geometry_from_config(_cfg(**{"+object": "bottle"}).pick.top_down)
+    cube = geometry_from_config(_cfg().pick.top_down)
+    for held in (0.288, 0.45, 0.555):
+        assert grasp_succeeded(held, bottle), held
+    for bad in (0.25, 0.725, 0.843, 0.991):
+        assert not grasp_succeeded(bad, bottle), bad
+    assert (cube.grasp_min, cube.grasp_max) == (0.2, 0.9)
+    assert grasp_succeeded(0.725, cube)
+
+
+@pytest.mark.parametrize("bad", [0.725, 0.843, 0.25])
+def test_a_bottle_grasp_outside_the_held_band_lets_go_and_retries(bad):
+    """A bottle reading outside the held band is a miss: the gripper opens, the arm
+    goes back up to the hover and the pick retries within pick.max_attempts, exactly
+    as an empty close does (2026-11-09: a neck grasp at 0.725 was thrown)."""
+    cfg = _cfg(**{"+object": "bottle", "pick.top_down.lateral_servo.enabled": "false"})
+    skills = build_skills(cfg)
+    readings = iter([bad, 0.45])
+    skills._read = lambda _reading: next(readings)  # pylint: disable=protected-access
+    reply = skills.pick()
+    skills.close()
+    assert reply["held"] is True and reply["note"] is None
+    first, second = reply["attempts"]
+    assert (first["gripper"], first["held"]) == (bad, False)
+    assert (second["gripper"], second["held"]) == (0.45, True)
+    assert [m["name"] for m in first["moves"]][-1] == "retreat"
+    assert skills.gripper_command == 1.0
+
+
+def test_a_bottle_outside_the_held_band_on_every_attempt_is_not_held():
+    """Both attempts outside the band: the pick ends not held, gripper open."""
+    cfg = _cfg(**{"+object": "bottle", "pick.top_down.lateral_servo.enabled": "false"})
+    skills = build_skills(cfg)
+    skills._read = lambda _reading: 0.725  # pylint: disable=protected-access
+    reply = skills.pick()
+    skills.close()
+    assert reply["held"] is False and reply["refused"] is False
+    assert [a["held"] for a in reply["attempts"]] == [False, False]
+    assert skills.gripper_command == 0.0
 
 
 def _wrap(a):
