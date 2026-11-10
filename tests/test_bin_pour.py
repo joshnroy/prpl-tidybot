@@ -16,6 +16,7 @@ from prpl_tidybot.bin_pour import (
     joint_limits,
     plan_bin_pour,
     pour_point,
+    set_down_path,
 )
 from prpl_tidybot.top_down_pick import TopDownPickGeometry, forward_kinematics
 
@@ -255,3 +256,34 @@ def test_the_arm_moving_straight_between_kept_waypoints_stays_on_the_path(plan):
                     assert gap <= POUR.path_tolerance + 0.005, stage.name
                 start = q
         previous = stage.arm[-1]
+
+
+def test_the_set_down_goes_straight_down_onto_the_grasp_point_from_a_turned_base(plan):
+    """The base back 4 degrees short of its grasp heading and 1 cm off: the re-planned
+    lower ends with the pinch point over the same map point, the pads at the same map
+    heading, and moves level first, then straight down."""
+    grasped = plan.stand
+    base = (grasped[0] + 0.01, grasped[1] - 0.005, grasped[2] - math.radians(4.0))
+    held = next(s for s in plan.stages if s.name == "lift").arm[-1]
+    rim = next(s for s in plan.stages if s.name == "rim").arm[-1]
+    path = set_down_path(plan, BIN, GEOM, POUR, grasped, base, held)
+
+    def in_map(pose, q):
+        pos, approach, closing = forward_kinematics(q, GEOM)
+        pads = np.cross(closing, approach)
+        c, s = math.cos(pose[2]), math.sin(pose[2])
+        ax = pos[0] + GEOM.mounting_offset
+        xy = np.array([pose[0] + c * ax - s * pos[1], pose[1] + s * ax + c * pos[1]])
+        return xy, pos[2], pose[2] + math.atan2(pads[1], pads[0])
+
+    want_xy, want_z, want_heading = in_map(grasped, rim)
+    got_xy, got_z, got_heading = in_map(base, path["lower"][-1])
+    assert np.linalg.norm(got_xy - want_xy) < 0.005
+    assert got_z == pytest.approx(want_z, abs=0.005)
+    turned = (got_heading - want_heading) % math.pi
+    assert min(turned, math.pi - turned) < math.radians(1.0)
+    for q in path["lower_fine"]:
+        assert np.linalg.norm(in_map(base, q)[0] - want_xy) < 0.005
+    hover_xy, hover_z, _ = in_map(base, path["withdraw"][-1])
+    assert np.linalg.norm(hover_xy - want_xy) < 0.005
+    assert hover_z == pytest.approx(want_z + POUR.hover, abs=0.005)
