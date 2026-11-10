@@ -60,6 +60,7 @@ from prpl_tidybot.top_down_pick import (
     half_turn_sign,
     pointing_down_joints,
     standoff_pose,
+    standoff_poses,
     top_down_joint_targets,
 )
 from prpl_tidybot.visual_servo.image_sources import ImageSource
@@ -73,6 +74,8 @@ from prpl_tidybot.wrist_hold import HoldCheck, HoldLook
 _logger = logging.getLogger(__name__)
 
 _MAX_DRIVE_TICKS = 600
+# The most straight legs one checked drive takes, replanning after each.
+MAX_DRIVE_LEGS = 4
 # The bottle's end held toward the top of the wrist frame (pick.top_down.
 # orient_bottle_neck): the neck, as in 15 of the 25 picks of 2026-11-05 (8/12 of
 # Josh's labelled holds), so most of the throws the toss parameters were fitted on
@@ -755,6 +758,7 @@ def _drive_to(
     workspace: Workspace | None = None,
     stop: threading.Event | None = None,
     bin_fit: BinFit | None = None,
+    detour: bool = True,
 ) -> tuple[float, float, float]:
     """Drive the base to the map-frame pose with the kinematic3d executor (as
     hardware_tests/test_base_map_target.py does); returns the reached pose.
@@ -763,30 +767,50 @@ def _drive_to(
     cube cannot be found (the reset after a failed localization). With a
     ``workspace`` the drive is checked first (drivable box, barrier;
     :meth:`Workspace.plan_path`, which may back straight off the barrier before
-    turning) and a drive that would leave it raises ``ValueError`` before the base
-    moves. A set ``stop`` ends the drive (``ArmMotionAborted``) without another
-    command.
+    turning, or with ``detour`` drive through one waypoint) and a drive that would
+    leave it raises ``ValueError`` before the base moves. A set ``stop`` ends the
+    drive (``ArmMotionAborted``) without another command.
+
+    A plan of more than one leg drives only its first, then plans again from the pose
+    the base actually reached, up to ``MAX_DRIVE_LEGS`` legs; a plan refused there
+    raises ``ValueError`` saying the base had moved.
     """
-    legs = [(float(pose[0]), float(pose[1]), float(pose[2]))]
-    if workspace is not None:
-        obs, _ = real_env.reset()
-        here = obs.map_base_pose
-        legs, problem = workspace.plan_path(
-            (float(here.x), float(here.y), float(here.theta())), pose, bin_fit
-        )
-        if problem is not None:
-            raise ValueError(f"Drive refused: {problem}.")
-        if len(legs) > 1:
+    goal = (float(pose[0]), float(pose[1]), float(pose[2]))
+    if workspace is None:
+        return _drive_straight(real_env, goal, stop)
+    obs, _ = real_env.reset()
+    here = obs.map_base_pose
+    start = (float(here.x), float(here.y), float(here.theta()))
+    legs, problem = workspace.plan_path(start, goal, bin_fit, detour)
+    if problem is not None:
+        raise ValueError(f"Drive refused: {problem}.")
+    for k in range(1, MAX_DRIVE_LEGS + 1):
+        if detour and len(legs) > 1 and legs[0] != workspace.back_off_pose(start):
+            _logger.info(
+                "Driving through the waypoint (%+.3f, %+.3f) to clear the straight "
+                "drive's obstacle.",
+                legs[0][0],
+                legs[0][1],
+            )
+        elif len(legs) > 1:
             _logger.info(
                 "Backing straight off the barrier to (%+.3f, %+.3f) before the drive.",
                 legs[0][0],
                 legs[0][1],
             )
-    reached: tuple[float, float, float] | None = None
-    for leg in legs:
-        reached = _drive_straight(real_env, leg, stop)
-    assert reached is not None
-    return reached
+        start = _drive_straight(real_env, legs[0], stop)
+        if len(legs) == 1:
+            return start
+        legs, problem = workspace.plan_path(start, goal, bin_fit, detour)
+        if problem is not None:
+            raise ValueError(
+                f"Drive refused after leg {k} (the base moved, to ({start[0]:+.3f}, "
+                f"{start[1]:+.3f})): {problem}."
+            )
+    raise ValueError(
+        f"Drive stopped after {MAX_DRIVE_LEGS} legs short of ({goal[0]:+.3f}, "
+        f"{goal[1]:+.3f}), at ({start[0]:+.3f}, {start[1]:+.3f})."
+    )
 
 
 def _drive_straight(
@@ -836,7 +860,27 @@ def pick_problem(
     """Why the top-down pick of ``cube`` cannot even start from ``robot``, or None:
 
     the cube past or on the barrier (the robot never crosses it), no standoff that keeps
-    the base in the drivable box and on its side, or no straight drive there.
+    the base in the drivable box and on its side, or no drive to any (:func:`pick_stand`).
+    """
+    return pick_stand(robot, cube, geom, floor, workspace, bin_fit)[2]
+
+
+def pick_stand(
+    robot: Sequence[float],
+    cube: dict[str, float],
+    geom: TopDownPickGeometry,
+    floor: Sequence[float],
+    workspace: Workspace | None,
+    bin_fit: BinFit | None = None,
+) -> tuple[
+    tuple[float, float, float] | None, list[tuple[float, float, float]], str | None
+]:
+    """(standoff, the legs there, None), or (None, [], why the pick cannot start).
+
+    The standoff is ``standoff_pose``'s when the drive there is allowed
+    (:meth:`Workspace.plan_path`: straight, backing off the barrier first, or through
+    one waypoint); otherwise the first of its other standoffs (``standoff_poses``,
+    the nearest heading first) with a drive. Refused with the first standoff's reason.
     """
     if workspace is not None:
         yaw = cube.get("yaw")
@@ -844,7 +888,7 @@ def pick_problem(
             yaw = math.radians(cube["yaw_deg"])
         problem = workspace.cube_problem((cube["x"], cube["y"]), yaw)
         if problem is not None:
-            return problem
+            return None, [], problem
     try:
         stand = standoff_pose(
             robot,
@@ -854,12 +898,20 @@ def pick_problem(
             None if workspace is None else workspace.valid(bin_fit),
         )
     except ValueError as e:
-        return str(e)
-    if workspace is not None:
-        problem = workspace.path_problem(robot, stand, bin_fit)
-        if problem is not None:
-            return f"pick standoff unreachable: {problem}"
-    return None
+        return None, [], str(e)
+    if workspace is None:
+        return stand, [stand], None
+    first: str | None = None
+    for stand in standoff_poses(
+        robot, (cube["x"], cube["y"]), geom, floor, workspace.valid(bin_fit)
+    ):
+        legs, problem = workspace.plan_path(robot, stand, bin_fit, detour=True)
+        if problem is None:
+            return stand, legs, None
+        if first is None:
+            first = f"pick standoff unreachable: {problem}"
+    assert first is not None
+    return None, [], first
 
 
 def _plus_minus(step: float, top: float) -> tuple[float, ...]:
@@ -948,21 +1000,19 @@ def plan_pick(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     or why the pick cannot start: everything checked before anything moves.
 
     The cube past or on the barrier, no standoff in the drivable box on the robot's
-    side clear of the bin, no straight drive there (:func:`pick_problem`); for a cube
+    side clear of the bin, no drive to any (:func:`pick_stand`); for a cube
     inside the bin, the pick out of it off (``in_bin`` None) or no grasp on either pair
     of its faces clear of the walls; otherwise no IK for the hover and the grasp, or,
     with a bin localized, no grasp on either pair of faces whose hover, grasp and
     carry clear its walls (the bin an obstacle only). Returns (standoff, None) or
-    (None, why)."""
+    (None, why); the pick drives there with ``_drive_to(..., detour=True)``."""
     if cube.get("in_bin") and in_bin is None:
         return None, IN_BIN_PICK_OFF
-    problem = pick_problem(robot, cube, geom, floor, workspace, bin_fit)
+    stand, _, problem = pick_stand(robot, cube, geom, floor, workspace, bin_fit)
     if problem is not None:
         return None, problem
+    assert stand is not None
     xy = (cube["x"], cube["y"])
-    stand = standoff_pose(
-        robot, xy, geom, floor, None if workspace is None else workspace.valid(bin_fit)
-    )
     if cube.get("in_bin") and bin_fit is not None:
         chosen, wall = _bin_grasp_geometry(geom, stand, cube, bin_fit, in_bin, seed)
         if chosen is None:

@@ -416,7 +416,7 @@ def test_a_refused_back_off_refuses_the_drive_and_says_so():
     names the back-off."""
     behind = BinFit(x=0.235, y=-0.55, yaw=0.0, length=0.39, width=0.29, height=0.21)
     assert WS_1020.pose_problem(FAR_STAND, behind) is None
-    waypoints, problem = WS_1020.plan_path(FAR_STAND, RUN9_STANDOFF, behind)
+    waypoints, problem = WS_1020.plan_path(FAR_STAND, RUN9_STANDOFF, behind, detour=False)
     assert not waypoints and problem is not None
     assert "back" in problem and "bin" in problem
-    assert WS_1020.path_problem(FAR_STAND, RUN9_STANDOFF, behind) == problem
+    assert WS_1020.path_problem(FAR_STAND, RUN9_STANDOFF, behind, detour=False) == problem
