@@ -29,6 +29,7 @@ barrier: like Tossing3D's room-spanning barrier, the robot never crosses it.
 
 from __future__ import annotations
 
+import heapq
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -46,6 +47,17 @@ BASE_WIDTH = 0.508
 _TURN_RADIUS = 0.5 * math.hypot(BASE_LENGTH, BASE_WIDTH)
 # How much further a back-off goes, for the drive's tracking error.
 BACK_OFF_SLACK = 0.02
+# The grid route's cell (m), and how far from the start or the goal a straight leg into
+# or out of the grid's free cells is tried.
+GRID_CELL = 0.05
+_ATTACH_RADIUS = 0.8
+_START, _GOAL = -1, -2
+_NEIGHBOURS = tuple(
+    (da, db, math.hypot(da, db))
+    for da in (-1, 0, 1)
+    for db in (-1, 0, 1)
+    if (da, db) != (0, 0)
+)
 
 Pose = tuple[float, float, float]
 
@@ -123,6 +135,14 @@ class Barrier:
             self.length * abs(nx * c + ny * s) + self.thickness * abs(-nx * s + ny * c)
         )
         return nx * (point[0] - self.x) + ny * (point[1] - self.y) - half
+
+    def depths(
+        self, x: NDArray[np.float64], y: NDArray[np.float64]
+    ) -> NDArray[np.float64]:
+        """:meth:`depth` of every point (``x[i]``, ``y[i]``) at once."""
+        return np.asarray(self.depth((0.0, 0.0)) + self.robot_side[0] * x) + (
+            self.robot_side[1] * y
+        )
 
     def as_dict(self) -> dict[str, Any]:
         """Plain floats: the skill server's ``observe()["barrier"]``."""
@@ -239,33 +259,277 @@ class Workspace:
         goal: Sequence[float],
         bin_fit: BinFit | None = None,
     ) -> tuple[list[tuple[float, float, float]], str | None]:
-        """The straight legs from ``start`` to ``goal`` ([goal], or [back-off, goal])
-        and None, or ([], why the drive is refused).
+        """The straight legs from ``start`` to ``goal`` ([goal], [back-off, goal], or a
+        grid route's [waypoint, ..., goal]) and None, or ([], why the drive is
+        refused).
 
         Straight to the goal when :meth:`straight_problem` allows it. Otherwise,
         when the base is too near the barrier to turn freely (a turn towards it swings
         a corner closer: run9 at the far toss stand), first back straight away from
         the barrier along its normal with no turn (:meth:`back_off_pose`), then drive
-        on; both legs must pass the full check.
+        on; both legs must pass the full check. Only when neither works (the straight
+        line crosses the bin: 2026-11-08 15:32) is a bent route searched for
+        (:meth:`grid_route`); every one of its legs passes :meth:`straight_problem`.
+        A goal the base may not stand at is refused without a search.
         """
         goal_pose = (float(goal[0]), float(goal[1]), float(goal[2]))
         direct = self.straight_problem(start, goal_pose, bin_fit)
         if direct is None:
             return [goal_pose], None
+        refusal = direct
         back = self.back_off_pose(start)
-        if back is None:
-            return [], direct
-        where = f"backing straight off the barrier first, to ({back[0]:+.3f}, "
-        where += f"{back[1]:+.3f})"
-        problem = self.straight_problem(start, back, bin_fit)
-        if problem is None:
-            problem = self.straight_problem(back, goal_pose, bin_fit)
+        if back is not None:
+            where = f"backing straight off the barrier first, to ({back[0]:+.3f}, "
+            where += f"{back[1]:+.3f})"
+            problem = self.straight_problem(start, back, bin_fit)
             if problem is None:
-                return [back, goal_pose], None
-            where += ", then"
+                problem = self.straight_problem(back, goal_pose, bin_fit)
+                if problem is None:
+                    return [back, goal_pose], None
+                where += ", then"
+            else:
+                where += ", is refused too"
+            refusal = f"{direct}; {where}: {problem}"
+        if self.pose_problem(goal_pose, bin_fit) is not None:
+            return [], refusal  # no route ends at a pose the base may not stand at
+        legs, why = self.grid_route(start, goal_pose, bin_fit)
+        if legs:
+            return legs, None
+        return [], f"{refusal}; {why}"
+
+    def grid_route(  # pylint: disable=too-many-locals
+        self,
+        start: Sequence[float],
+        goal: Sequence[float],
+        bin_fit: BinFit | None = None,
+    ) -> tuple[list[tuple[float, float, float]], str]:
+        """A bent drive from ``start`` to ``goal`` in as few straight legs as the
+        straight-drive check allows, or ([], why there is none).
+
+        The base is holonomic, so the search is in (x, y) only: A* over a
+        ``GRID_CELL`` grid of the drivable box, 8-connected, Euclidean heuristic, ties
+        broken by cell index. A cell is free when the circle the footprint turns within
+        (``_TURN_RADIUS``) keeps ``clearance`` from the barrier and stays off the bin
+        grown by ``clearance``: the footprint is then valid there at *every* heading, so
+        the base may turn anywhere along the route. That is conservative (the base fits
+        through narrower gaps at the right heading) but it never misleads the search
+        about turning.
+
+        The start and the goal need not be free cells (both are often near the barrier
+        or the bin). The route enters the free cells by a straight leg holding the
+        start heading, and leaves them by one already at the goal heading: pure
+        translations, each checked exactly (:meth:`_sweep_clear`, the whole swept
+        footprint) for every free cell within ``_ATTACH_RADIUS``. Between the first
+        cell and the last the heading turns evenly with distance.
+
+        The cell path is then cut into legs greedily (the farthest waypoint first).
+        Every leg returned passes :meth:`straight_problem` at its default resolution
+        *and* sampled at least every 1.25 cm and 0.025 rad (:meth:`_leg_problem`),
+        turning as it goes exactly as a drive turns.
+        """
+        cell = GRID_CELL
+        fb = self.floor_bounds
+        xs = fb[0] + cell * np.arange(math.floor((fb[1] - fb[0]) / cell + 1e-9) + 1)
+        ys = fb[2] + cell * np.arange(math.floor((fb[3] - fb[2]) / cell + 1e-9) + 1)
+        free = self._turn_free(xs, ys, bin_fit)
+        rows = len(ys)
+        gx, gy = float(goal[0]), float(goal[1])
+
+        def xy(k: int) -> tuple[float, float]:
+            return float(xs[k // rows]), float(ys[k % rows])
+
+        def h(k: int) -> float:
+            x, y = xy(k)
+            return math.hypot(gx - x, gy - y)
+
+        def attach(
+            here: Sequence[float], heading: float, into: bool
+        ) -> dict[int, float]:
+            """Free cells within reach of ``here`` by a clear translation at
+            ``heading`` (into the grid from ``here``, or out of it to ``here``), and
+            their distances."""
+            need = self.clearance
+            depth = self.barrier_clearance(here)
+            if into and depth is not None and 0.0 <= depth < self.clearance:
+                need = depth - 1e-9  # as straight_problem: a start inside the margin
+            found = {}
+            a_s = (np.abs(xs - here[0]) <= _ATTACH_RADIUS).nonzero()[0]
+            b_s = (np.abs(ys - here[1]) <= _ATTACH_RADIUS).nonzero()[0]
+            for a in a_s:
+                for b in b_s:
+                    d = math.hypot(xs[a] - here[0], ys[b] - here[1])
+                    if not free[a, b] or d > _ATTACH_RADIUS:
+                        continue
+                    point = (float(xs[a]), float(ys[b]))
+                    if self._sweep_clear(here, point, heading, bin_fit, need):
+                        found[int(a) * rows + int(b)] = d
+            return found
+
+        entries = attach(start, float(start[2]), True)
+        exits = attach(goal, float(goal[2]), False)
+        no_route = f"no route round on the {cell:.2f} m grid"
+        if not entries or not exits:
+            end = "from the start into" if not entries else "out of them to the goal"
+            return [], (
+                f"{no_route} (no clear straight leg {end} the cells where the base "
+                f"can turn)"
+            )
+        # (f, h, node, parent, g): node _GOAL is the goal, parent _START the start.
+        heap = [(d + h(k), h(k), k, _START, d) for k, d in entries.items()]
+        heapq.heapify(heap)
+        parents: dict[int, int] = {}
+        best = dict(entries)
+        while heap:
+            _, _, k, parent, g = heapq.heappop(heap)
+            if k == _GOAL:
+                return self._shortcut(start, goal, parents, parent, xy, bin_fit)
+            if k in parents:
+                continue
+            parents[k] = parent
+            if k in exits:
+                heapq.heappush(heap, (g + exits[k], 0.0, _GOAL, k, g + exits[k]))
+            a, b = divmod(k, rows)
+            for da, db, step in _NEIGHBOURS:
+                na, nb = a + da, b + db
+                if not (0 <= na < len(xs) and 0 <= nb < rows and free[na, nb]):
+                    continue
+                n = na * rows + nb
+                ng = g + step * cell
+                if n in parents or ng >= best.get(n, math.inf) - 1e-12:
+                    continue
+                best[n] = ng
+                heapq.heappush(heap, (ng + h(n), h(n), n, k, ng))
+        return [], (
+            f"{no_route} ({len(parents)} cells where the base can turn reached from "
+            f"the start, none with a clear straight leg to the goal)"
+        )
+
+    def _turn_free(
+        self,
+        xs: NDArray[np.float64],
+        ys: NDArray[np.float64],
+        bin_fit: BinFit | None,
+    ) -> NDArray[np.bool_]:
+        """Which grid centres the base may stand at, and turn on the spot at: the
+        circle its footprint turns within keeps ``clearance`` off the barrier's
+        robot-side face and the bin (:meth:`grid_route`)."""
+        x, y = np.meshgrid(xs, ys, indexing="ij")
+        free = np.ones(x.shape, dtype=bool)
+        if self.barrier is not None:
+            free &= self.barrier.depths(x, y) - _TURN_RADIUS >= self.clearance + 1e-6
+        if bin_fit is not None:
+            c, s = math.cos(bin_fit.yaw), math.sin(bin_fit.yaw)
+            dx, dy = x - bin_fit.x, y - bin_fit.y
+            u = np.abs(c * dx + s * dy) - (0.5 * bin_fit.length + self.clearance)
+            v = np.abs(-s * dx + c * dy) - (0.5 * bin_fit.width + self.clearance)
+            gap = np.hypot(np.maximum(u, 0.0), np.maximum(v, 0.0))
+            free &= gap > _TURN_RADIUS + 1e-6
+        return free
+
+    def _sweep_clear(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        a: Sequence[float],
+        b: Sequence[float],
+        heading: float,
+        bin_fit: BinFit | None,
+        need: float,
+    ) -> bool:
+        """Whether the base translating from ``a`` to ``b`` (x, y) at a fixed
+        ``heading`` stays valid the whole way, not just at samples: its centre in the
+        drivable box (convex, so the ends suffice), every point of the swept footprint
+        ``need`` past the barrier's face (depth is linear, so the two footprints'
+        corners suffice), and the swept footprint (the convex hull of the two) off
+        the bin grown by ``clearance`` (separating axes: both rectangles' and the
+        normal to the motion)."""
+        fb = self.floor_bounds
+        for p in (a, b):
+            if not (fb[0] <= p[0] <= fb[1] and fb[2] <= p[1] <= fb[3]):
+                return False
+        corners = np.vstack(
+            [footprint((a[0], a[1], heading)), footprint((b[0], b[1], heading))]
+        )
+        if self.barrier is not None:
+            if float(self.barrier.depths(corners[:, 0], corners[:, 1]).min()) < need:
+                return False
+        if bin_fit is None:
+            return True
+        box = _bin_corners(bin_fit, self.clearance)
+        c, s = math.cos(heading), math.sin(heading)
+        cb, sb = math.cos(bin_fit.yaw), math.sin(bin_fit.yaw)
+        axes = [(c, s), (-s, c), (cb, sb), (-sb, cb)]
+        if math.hypot(b[0] - a[0], b[1] - a[1]) > 1e-12:
+            axes.append((-(b[1] - a[1]), b[0] - a[0]))
+        for axis in axes:
+            pa, pb = corners @ axis, box @ axis
+            if pa.max() < pb.min() or pb.max() < pa.min():
+                return True
+        return False
+
+    def _shortcut(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        start: Sequence[float],
+        goal: Sequence[float],
+        parents: dict[int, int],
+        last: int,
+        xy: Callable[[int], tuple[float, float]],
+        bin_fit: BinFit | None,
+    ) -> tuple[list[tuple[float, float, float]], str]:
+        """The A* cell path (``parents`` back from ``last``) as waypoints, then as
+        few legs as :meth:`_leg_problem` passes (:meth:`grid_route`)."""
+        cells = [last]
+        while parents[cells[-1]] != _START:
+            cells.append(parents[cells[-1]])
+        cells.reverse()
+        points = [xy(k) for k in cells]
+        # The heading turns from the start's to the goal's evenly with distance
+        # between the first cell (still the start heading) and the last (the goal's).
+        run = [0.0]
+        for p, q in zip(points, points[1:]):
+            run.append(run[-1] + math.hypot(q[0] - p[0], q[1] - p[1]))
+        turn = math.atan2(math.sin(goal[2] - start[2]), math.cos(goal[2] - start[2]))
+        waypoints: list[tuple[float, float, float]] = [
+            (float(start[0]), float(start[1]), float(start[2]))
+        ]
+        if run[-1] < 1e-9:  # one cell: turn on the spot there
+            waypoints += [
+                (points[0][0], points[0][1], float(start[2])),
+                (points[0][0], points[0][1], float(start[2]) + turn),
+            ]
         else:
-            where += ", is refused too"
-        return [], f"{direct}; {where}: {problem}"
+            waypoints += [
+                (p[0], p[1], float(start[2]) + turn * r / run[-1])
+                for p, r in zip(points, run)
+            ]
+        waypoints.append((float(goal[0]), float(goal[1]), float(goal[2])))
+        legs: list[tuple[float, float, float]] = []
+        i = 0
+        while i < len(waypoints) - 1:
+            for j in range(len(waypoints) - 1, i, -1):
+                if self._leg_problem(waypoints[i], waypoints[j], bin_fit) is None:
+                    break
+            else:
+                problem = self._leg_problem(waypoints[i], waypoints[i + 1], bin_fit)
+                return [], f"the grid route's leg is refused: {problem}"
+            legs.append(waypoints[j])
+            i = j
+        return legs, ""
+
+    def _leg_problem(
+        self,
+        start: Sequence[float],
+        goal: Sequence[float],
+        bin_fit: BinFit | None,
+    ) -> str | None:
+        """:meth:`straight_problem` at its default resolution, then (a multiple of it,
+        so every default sample is among them) sampled at least every 1.25 cm along
+        the leg and 0.025 rad of its turn."""
+        problem = self.straight_problem(start, goal, bin_fit)
+        if problem is not None:
+            return problem
+        dtheta = math.atan2(math.sin(goal[2] - start[2]), math.cos(goal[2] - start[2]))
+        length = math.hypot(goal[0] - start[0], goal[1] - start[1])
+        k = max(1, math.ceil(length / 0.25), math.ceil(abs(dtheta) / 0.5))
+        return None if k == 1 else self.straight_problem(start, goal, bin_fit, 20 * k)
 
     def straight_problem(
         self,
@@ -345,9 +609,9 @@ def _rectangle(
 ) -> NDArray[np.float64]:
     c, s = math.cos(yaw), math.sin(yaw)
     local = np.array([[1, 1], [1, -1], [-1, -1], [-1, 1]]) * [length / 2, width / 2]
-    return np.c_[
-        x + c * local[:, 0] - s * local[:, 1], y + s * local[:, 0] + c * local[:, 1]
-    ]
+    return np.column_stack(
+        (x + c * local[:, 0] - s * local[:, 1], y + s * local[:, 0] + c * local[:, 1])
+    )
 
 
 def _bin_corners(bin_fit: BinFit, grow: float) -> NDArray[np.float64]:

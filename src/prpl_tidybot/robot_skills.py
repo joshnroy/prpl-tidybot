@@ -762,10 +762,10 @@ def _drive_to(
     Uses a robot-only perceiver: driving needs no cube, and must still work when the
     cube cannot be found (the reset after a failed localization). With a
     ``workspace`` the drive is checked first (drivable box, barrier;
-    :meth:`Workspace.plan_path`, which may back straight off the barrier before
-    turning) and a drive that would leave it raises ``ValueError`` before the base
-    moves. A set ``stop`` ends the drive (``ArmMotionAborted``) without another
-    command.
+    :meth:`Workspace.plan_path`, which may back straight off the barrier first, or
+    go round the bin in several straight legs) and a drive that would leave it raises
+    ``ValueError`` before the base moves. A set ``stop`` ends the drive
+    (``ArmMotionAborted``) without another command.
     """
     legs = [(float(pose[0]), float(pose[1]), float(pose[2]))]
     if workspace is not None:
@@ -778,9 +778,12 @@ def _drive_to(
             raise ValueError(f"Drive refused: {problem}.")
         if len(legs) > 1:
             _logger.info(
-                "Backing straight off the barrier to (%+.3f, %+.3f) before the drive.",
-                legs[0][0],
-                legs[0][1],
+                "Driving in %d straight legs, via %s.",
+                len(legs),
+                ", ".join(
+                    f"({x:+.3f}, {y:+.3f}, {math.degrees(t):+.0f} deg)"
+                    for x, y, t in legs[:-1]
+                ),
             )
     reached: tuple[float, float, float] | None = None
     for leg in legs:
@@ -836,7 +839,8 @@ def pick_problem(
     """Why the top-down pick of ``cube`` cannot even start from ``robot``, or None:
 
     the cube past or on the barrier (the robot never crosses it), no standoff that keeps
-    the base in the drivable box and on its side, or no straight drive there.
+    the base in the drivable box and on its side, or no drive to any of them
+    (:func:`pick_stand`).
     """
     if workspace is not None:
         yaw = cube.get("yaw")
@@ -845,21 +849,44 @@ def pick_problem(
         problem = workspace.cube_problem((cube["x"], cube["y"]), yaw)
         if problem is not None:
             return problem
+    return pick_stand(robot, (cube["x"], cube["y"]), geom, floor, workspace, bin_fit)[1]
+
+
+def pick_stand(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    robot: Sequence[float],
+    cube_xy: Sequence[float],
+    geom: TopDownPickGeometry,
+    floor: Sequence[float],
+    workspace: Workspace | None,
+    bin_fit: BinFit | None = None,
+) -> tuple[tuple[float, float, float] | None, str | None]:
+    """The standoff the pick of the cube at ``cube_xy`` drives to from ``robot``, or
+    why there is none: ``standoff_pose``'s preferred stand when the base can drive
+    there (:meth:`Workspace.plan_path`), else the first of its other candidates, in
+    its order, that it can drive to. With none, the preferred stand's refusal."""
+    is_valid = None if workspace is None else workspace.valid(bin_fit)
     try:
-        stand = standoff_pose(
-            robot,
-            (cube["x"], cube["y"]),
-            geom,
-            floor,
-            None if workspace is None else workspace.valid(bin_fit),
-        )
+        stand = standoff_pose(robot, cube_xy, geom, floor, is_valid)
     except ValueError as e:
-        return str(e)
-    if workspace is not None:
-        problem = workspace.path_problem(robot, stand, bin_fit)
-        if problem is not None:
-            return f"pick standoff unreachable: {problem}"
-    return None
+        return None, str(e)
+    if workspace is None:
+        return stand, None
+    problem = workspace.path_problem(robot, stand, bin_fit)
+    if problem is None:
+        return stand, None
+    preferred = stand
+
+    def reachable(pose: tuple[float, float, float]) -> bool:
+        return (
+            pose != preferred
+            and workspace.pose_problem(pose, bin_fit) is None
+            and workspace.path_problem(robot, pose, bin_fit) is None
+        )
+
+    try:
+        return standoff_pose(robot, cube_xy, geom, floor, reachable), None
+    except ValueError:
+        return None, f"pick standoff unreachable: {problem}"
 
 
 def _plus_minus(step: float, top: float) -> tuple[float, ...]:
@@ -948,7 +975,7 @@ def plan_pick(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     or why the pick cannot start: everything checked before anything moves.
 
     The cube past or on the barrier, no standoff in the drivable box on the robot's
-    side clear of the bin, no straight drive there (:func:`pick_problem`); for a cube
+    side clear of the bin, no drive there (:func:`pick_problem`); for a cube
     inside the bin, the pick out of it off (``in_bin`` None) or no grasp on either pair
     of its faces clear of the walls; otherwise no IK for the hover and the grasp, or,
     with a bin localized, no grasp on either pair of faces whose hover, grasp and
@@ -960,9 +987,8 @@ def plan_pick(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     if problem is not None:
         return None, problem
     xy = (cube["x"], cube["y"])
-    stand = standoff_pose(
-        robot, xy, geom, floor, None if workspace is None else workspace.valid(bin_fit)
-    )
+    stand, _ = pick_stand(robot, xy, geom, floor, workspace, bin_fit)
+    assert stand is not None  # pick_problem found it
     if cube.get("in_bin") and bin_fit is not None:
         chosen, wall = _bin_grasp_geometry(geom, stand, cube, bin_fit, in_bin, seed)
         if chosen is None:
