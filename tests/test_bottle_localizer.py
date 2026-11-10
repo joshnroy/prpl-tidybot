@@ -418,3 +418,83 @@ def test_a_label_split_in_two_by_its_dark_band_is_filled_as_one(cameras):
     assert fit is not None
     assert math.hypot(fit.x - 0.43, fit.y - 0.25) < 0.03
     assert fit.iou >= 0.75
+
+
+# observe()'s bin fits (x, y, yaw, length, width) for the 2026-11-08 frames below: the
+# far spot (three times of day) and the close spot (two).
+BINS_20261108 = {
+    "standing_cap": (0.23625, 1.0775, -0.01963, 0.365, 0.26),
+    "hit_label_a": (0.23625, 1.0775, -0.01963, 0.365, 0.26),
+    "hit_label_b": (0.23625, 1.0775, -0.01963, 0.365, 0.26),
+    "empty_far_a": (0.23625, 1.0775, -0.01963, 0.365, 0.26),
+    "empty_far_b": (0.25063, 1.075, -0.01309, 0.365, 0.26),
+    "empty_far_c": (0.24875, 1.05375, 0.03272, 0.365, 0.26),
+    "empty_close_a": (-0.11875, -0.69625, 1.4399, 0.365, 0.26),
+    "empty_close_b": (-0.22437, -0.76, 1.55771, 0.365, 0.26),
+    "empty_close_c": (-0.155, -1.02, 1.4923, 0.365, 0.26),
+}
+
+
+def _find_in_bin_20261108(cameras, name):
+    path = Path(__file__).parent / "data" / f"bottle_in_bin_{name}_20261108.png"
+    source = CeilingBottleSource(
+        SERIALS,
+        image_client=_Images([cv.imread(str(path))]),
+        marker_client=_Markers(),
+        floor_bounds=BOUNDS,
+        num_frames=1,
+        frame_period_s=0.0,
+    )
+    return source.find_pose_in_box(_bin_box_of(*BINS_20261108[name]))
+
+
+def _inside_walls(found, fit):
+    x, y, _yaw = found
+    c, s = math.cos(-fit[2]), math.sin(-fit[2])
+    along = c * (x - fit[0]) - s * (y - fit[1])
+    across = s * (x - fit[0]) + c * (y - fit[1])
+    return abs(along) < fit[3] / 2 and abs(across) < fit[4] / 2
+
+
+def test_a_bottle_standing_in_the_bin_is_found_by_its_cap(cameras):
+    """2026-11-08 10:30: a toss landed in the far bin standing up (or leaning cap-up
+    on its near wall), and the toss said "cube not found". The walls hid the whole
+    label, so no pixel in the opening was label-red at any saturation; only the
+    grey cap showed (HSV saturation 75-150, value 28-69, against the interior's
+    saturation > 210 and value < 20). Ceiling video frame (half resolution, upscaled),
+    all but the bin blacked out."""
+    found = _find_in_bin_20261108(cameras, "standing_cap")
+    assert found is not None
+    assert _inside_walls(found, BINS_20261108["standing_cap"])
+    assert found[2] == 0.0
+
+
+@pytest.mark.parametrize(
+    ("name", "xy"),
+    [("hit_label_a", (0.176, 1.064)), ("hit_label_b", (0.324, 1.052))],
+)
+def test_a_bottle_lying_in_the_bin_is_still_found_by_its_label(cameras, name, xy):
+    """The same day's in-bin hits (10:23, 10:25) are still found where the label is."""
+    found = _find_in_bin_20261108(cameras, name)
+    assert found is not None
+    assert math.hypot(found[0] - xy[0], found[1] - xy[1]) < 0.01
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "empty_far_a",
+        "empty_far_b",
+        "empty_far_c",
+        "empty_close_a",
+        "empty_close_b",
+        "empty_close_c",
+    ],
+)
+def test_an_empty_bin_reads_empty(cameras, name):
+    """Empty bins from 2026-11-08 at both spots and through the day (10:30, 11:36,
+    12:53 far; 11:12, 12:14, 17:33 close): the rim, walls, highlights and shadows are
+    not an object in the bin. At 17:33 the close bin sat almost under a camera, which
+    saw its lit floor (hue 122-126, saturation 156-169, value 122-139) and the run
+    dumped the empty bin three times."""
+    assert _find_in_bin_20261108(cameras, name) is None
