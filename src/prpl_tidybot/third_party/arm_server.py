@@ -31,6 +31,7 @@ from prpl_tidybot.toss import (
     TOSS_WINDUP_TOLERANCE_DEG,
     max_joint_error_deg,
     plan_toss_swing,
+    summarize_swing,
     toss_windup_pose,
 )
 
@@ -130,13 +131,18 @@ class Arm:
                 gripper_release_ms=gripper_release_ms,
             )
             swing_start = time.time()
-            self.arm.run_position_trajectory(
+            trace = self.arm.run_position_trajectory(
                 trajectory, gripper_release_step=gripper_release_ms
             )
         finally:
             self.resume()
         # The wind-up takes seconds; callers align video to the swing itself.
-        return {"swing_start_time": swing_start}
+        result = {"swing_start_time": swing_start}
+        if trace is not None:
+            # The summary for the reply, and the full trace for the caller to save.
+            result.update(summarize_swing(trace))
+            result["swing_trace"] = trace
+        return result
 
     def move_joints_angular(self, qpos):
         # One blocking move under the arm's onboard position controller (as Jimmy

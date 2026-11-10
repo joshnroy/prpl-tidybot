@@ -1,5 +1,7 @@
 """Real arm interface backed by the Kinova arm RPC server."""
 
+from typing import Any
+
 from prpl_tidybot.interfaces.arm_interface import ArmInterface, ArmMotionAborted
 from prpl_tidybot.third_party.arm_server import ArmManager
 from prpl_tidybot.third_party.constants import ARM_RPC_HOST, ARM_RPC_PORT, RPC_AUTHKEY
@@ -81,7 +83,7 @@ class RealArmInterface(ArmInterface):
         heading: float = 0.0,
         max_vel: float = TOSS_MAX_VEL,
         gripper_release_ms: int = TOSS_GRIPPER_RELEASE_MS,
-    ) -> dict[str, float] | None:
+    ) -> dict[str, Any] | None:
         """Run the toss on the arm server (``Arm.toss``); blocks until it is done.
         Returns the swing's start time (after the wind-up)."""
         # The arm server releases the cyclic loop for the toss and always resumes it

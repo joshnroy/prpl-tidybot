@@ -21,6 +21,7 @@ from prpl_tidybot.top_down_pick import (
     geometry_from_config,
     pointing_down_joints,
 )
+from prpl_tidybot.toss import summarize_swing
 from prpl_tidybot.toss_cycles import run_toss_cycles
 
 _CONF_DIR = Path(__file__).resolve().parent.parent / "conf"
@@ -1007,3 +1008,38 @@ def test_each_pick_call_is_one_attempt(tmp_path, monkeypatch):
         _compose(cycles=1, skip_toss="true"), log_dir=tmp_path, prompt_fn=_Operator()
     )
     assert seen == [1]
+
+
+def test_the_toss_reply_carries_measured_fields_and_a_trace_file(tmp_path, monkeypatch):
+    """The planned fields are untouched; the arm server's measured summary sits beside
+    them and its full trace goes to swing_NNN.npz in the log dir, not into the JSON."""
+    n = 900
+    trace = {
+        "t": np.arange(n) * 0.001,
+        "q_deg": np.zeros((n, 7)),
+        "dq_deg_s": np.full((n, 7), 33.0),
+        "commanded_deg": np.ones((n, 7)),
+        "release_cycle": 675,
+        "failed_cycles": 0,
+    }
+    summary = summarize_swing(trace)
+    original = FakeArmInterface.toss
+
+    def toss(self, **kwargs):
+        return original(self, **kwargs) | summary | {"swing_trace": trace}
+
+    monkeypatch.setattr(FakeArmInterface, "toss", toss)
+    run_toss_cycles(
+        _compose(cycles=1, **{"+toss.grid": "[[120,675]]"}),
+        log_dir=tmp_path,
+        prompt_fn=_Operator(),
+    )
+    swing = json.loads((tmp_path / "cycles.json").read_text())["cycles"][0]["toss"]
+    assert swing["max_vel_deg_s"] == pytest.approx(120.0)
+    assert swing["release_time_s"] == pytest.approx(0.675)
+    assert swing["measured_max_vel_deg_s"] == pytest.approx(33.0)
+    assert swing["max_tracking_error_deg"] == pytest.approx(1.0)
+    assert "swing_trace" not in swing
+    assert swing["trace_file"] == "swing_001.npz"
+    saved = np.load(tmp_path / swing["trace_file"])
+    np.testing.assert_array_equal(saved["dq_deg_s"], trace["dq_deg_s"])

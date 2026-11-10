@@ -85,7 +85,7 @@ class ArmInterface(abc.ABC):
         heading: float = 0.0,
         max_vel: float = TOSS_MAX_VEL,
         gripper_release_ms: int = TOSS_GRIPPER_RELEASE_MS,
-    ) -> dict[str, float] | None:
+    ) -> dict[str, Any] | None:
         """Throw whatever the gripper holds (see ``prpl_tidybot.toss``).
 
         Moves to the wind-up pose with joint 1 at ``heading`` (Kortex degrees), swings
@@ -161,7 +161,7 @@ class FakeArmInterface(ArmInterface):
         heading: float = 0.0,
         max_vel: float = TOSS_MAX_VEL,
         gripper_release_ms: int = TOSS_GRIPPER_RELEASE_MS,
-    ) -> dict[str, float] | None:
+    ) -> dict[str, Any] | None:
         """Record the call and open the gripper; the arm conf is left unchanged.
 
         The swing is planned (and discarded) so that parameters the arm server would

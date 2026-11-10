@@ -419,10 +419,26 @@ class TorqueControlledArm:
             motor_cmd.velocity = 0
             motor_cmd.force = 100
 
+            # What the arm did, per cycle, from the feedback each Refresh already
+            # returns. Preallocated so the 1 kHz loop only stores floats; a cycle
+            # whose Refresh failed stays NaN rather than repeating the last frame.
+            n_cycles = len(trajectory)
+            measured_t = np.full(n_cycles, np.nan)
+            measured_q = np.full((n_cycles, self.actuator_count), np.nan)
+            measured_dq = np.full((n_cycles, self.actuator_count), np.nan)
+            gripper_pos = np.full(n_cycles, np.nan)
+            gripper_vel = np.full(n_cycles, np.nan)
+            # Both timings are kept on failed cycles too: a slow failure is the case
+            # they are for. loop_gap is this cycle's start minus the last one's end.
+            refresh_ms = np.full(n_cycles, np.nan)
+            loop_gap_ms = np.full(n_cycles, np.nan)
+            t_prev_end = math.nan
+            release_cycle = -1
+
             cyclic_count = 0
             failed_cyclic_count = 0
             t_cyclic = time.time()
-            while cyclic_count < len(trajectory):
+            while cyclic_count < n_cycles:
                 t_now = time.time()
                 if t_now - t_cyclic < 0.001:  # 1 kHz
                     continue
@@ -435,15 +451,43 @@ class TorqueControlledArm:
                 if cyclic_count >= gripper_release_step:
                     motor_cmd.position = 0
                     motor_cmd.velocity = 100
+                    if release_cycle < 0:
+                        release_cycle = cyclic_count
+                t_before = time.time()
                 try:
                     feedback = self.base_cyclic.Refresh(command, 0, self.send_options)
+                    t_after = time.time()
+                    measured_t[cyclic_count] = t_now
+                    for i in range(self.actuator_count):
+                        actuator = feedback.actuators[i]
+                        measured_q[cyclic_count, i] = actuator.position
+                        measured_dq[cyclic_count, i] = actuator.velocity
+                    gripper = feedback.interconnect.gripper_feedback.motor[0]
+                    gripper_pos[cyclic_count] = gripper.position
+                    gripper_vel[cyclic_count] = gripper.velocity
                 except:
+                    t_after = time.time()
                     failed_cyclic_count += 1
+                refresh_ms[cyclic_count] = (t_after - t_before) * 1000.0
+                loop_gap_ms[cyclic_count] = (t_now - t_prev_end) * 1000.0
+                t_prev_end = t_after
                 cyclic_count += 1
             print(
                 f"Position trajectory: {cyclic_count} cycles, "
                 f"{failed_cyclic_count} failed"
             )
+            return {
+                "t": measured_t,
+                "q_deg": measured_q,
+                "dq_deg_s": measured_dq,
+                "commanded_deg": np.asarray(trajectory, dtype=np.float64),
+                "gripper_pos": gripper_pos,
+                "gripper_vel": gripper_vel,
+                "refresh_ms": refresh_ms,
+                "loop_gap_ms": loop_gap_ms,
+                "release_cycle": int(release_cycle),
+                "failed_cycles": int(failed_cyclic_count),
+            }
         finally:
             base_servo_mode = Base_pb2.ServoingModeInformation()
             base_servo_mode.servoing_mode = Base_pb2.SINGLE_LEVEL_SERVOING
